@@ -1,0 +1,284 @@
+import { NextResponse } from "next/server";
+import prisma from "@/app/lib/prisma";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { r2 } from "@/app/lib/r2";
+import crypto from "crypto";
+
+import * as mammoth from "mammoth";
+import * as xlsx from "xlsx";
+
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+function obtenerMimeType(ext: string) {
+    if (ext === 'pdf') return 'application/pdf';
+    if (ext === 'png') return 'image/png';
+    if (ext === 'jpeg' || ext === 'jpg') return 'image/jpeg';
+    if (ext === 'webp') return 'image/webp';
+    return 'text/plain';
+}
+
+export async function GET() {
+    try {
+        const documentos = await prisma.documento.findMany({
+            include: { caso: { include: { representado: true } } },
+            orderBy: { createdAt: 'desc' }
+        });
+        return NextResponse.json(documentos);
+    } catch (error) {
+        console.error("Error al obtener documentos globales:", error);
+        return NextResponse.json({ error: "Error al obtener documentos" }, { status: 500 });
+    }
+}
+
+export async function POST(request: Request) {
+    try {
+        const body = await request.json();
+        const { nombreArchivo, claveArchivo } = body;
+
+        // =====================================================================
+        // PASO 1: DESCARGAR ARCHIVO DE R2
+        // =====================================================================
+        let buffer: Buffer;
+        try {
+            const comando = new GetObjectCommand({
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: claveArchivo,
+            });
+            const s3Response = await r2.send(comando);
+            const byteArray = await s3Response.Body?.transformToByteArray();
+
+            if (!byteArray) throw new Error("El archivo está vacío");
+            buffer = Buffer.from(byteArray);
+        } catch (err) {
+            console.error(`Error al descargar archivo de R2 [${nombreArchivo}]:`, err);
+            return NextResponse.json({ error: "No se pudo obtener el archivo físico desde la nube." }, { status: 400 });
+        }
+
+        // =====================================================================
+        // PASO 2: VALIDACIÓN DE HASH (BLOQUEO DE DUPLICADOS)
+        // =====================================================================
+        const hashGenerado = crypto.createHash('sha256').update(buffer).digest('hex');
+
+        const documentoDuplicado = await prisma.documento.findUnique({
+            where: { hashArchivo: hashGenerado },
+            include: { caso: { include: { representado: true } } }
+        });
+
+        if (documentoDuplicado) {
+            const nombreOriginal = documentoDuplicado.nombreArchivo;
+            const clienteAsociado = documentoDuplicado.caso?.representado?.nombre || "Bandeja de Entrada";
+            return NextResponse.json({
+                error: `⚠️ Documento duplicado: Ya subido como "${nombreOriginal}" en el expediente de ${clienteAsociado}.`
+            }, { status: 400 });
+        }
+
+        // =====================================================================
+        // PASO 3: BANDEJA DE ENTRADA A PRUEBA DE CONCURRENCIA (HILOS MÚLTIPLES)
+        // =====================================================================
+        const rutBandeja = "00000000-0";
+        let casoFinalId = "";
+
+        // upsert: Si no existe lo crea, si ya existe en este milisegundo, lo usa.
+        const repTemp = await prisma.representado.upsert({
+            where: { rut: rutBandeja },
+            update: {},
+            create: { nombre: "Bandeja de Entrada", rut: rutBandeja }
+        });
+
+        let casoPorDefecto = await prisma.caso.findFirst({
+            where: { representadoId: repTemp.id }
+        });
+
+        if (!casoPorDefecto) {
+            try {
+                casoPorDefecto = await prisma.caso.create({
+                    data: { representadoId: repTemp.id, areaJuridica: "CIVIL" }
+                });
+            } catch (e) {
+                // En caso de que otro hilo justo lo creara, simplemente lo rescatamos
+                casoPorDefecto = await prisma.caso.findFirst({
+                    where: { representadoId: repTemp.id }
+                });
+            }
+        }
+
+        if (!casoPorDefecto) throw new Error("Fallo al crear o recuperar Bandeja de Entrada.");
+        casoFinalId = casoPorDefecto.id;
+
+        const urlPublica = `https://${process.env.R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${claveArchivo}`;
+
+        let errorLectura = false;
+        const partesIA: any[] = [];
+        const ext = nombreArchivo.split('.').pop()?.toLowerCase() || "";
+
+        // =====================================================================
+        // PASO 4: EXTRAER TEXTO O IMÁGENES
+        // =====================================================================
+        try {
+            if (['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
+                partesIA.push({
+                    inlineData: { data: buffer.toString("base64"), mimeType: obtenerMimeType(ext) }
+                });
+            } else if (['docx', 'doc'].includes(ext)) {
+                const result = await mammoth.extractRawText({ buffer });
+                partesIA.push(`Texto extraído del Word:\n${result.value.substring(0, 15000)}`);
+            } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
+                const workbook = xlsx.read(buffer, { type: "buffer" });
+                const firstSheetName = workbook.SheetNames[0];
+                const csvData = xlsx.utils.sheet_to_csv(workbook.Sheets[firstSheetName]);
+                partesIA.push(`Datos extraídos del Excel:\n${csvData.substring(0, 15000)}`);
+            } else if (ext === 'txt') {
+                partesIA.push(`Texto del documento:\n${buffer.toString("utf-8").substring(0, 15000)}`);
+            } else {
+                throw new Error("Formato no soportado");
+            }
+        } catch (err) {
+            errorLectura = true;
+        }
+
+        let materiaLegal = "Documento sin clasificar";
+        let resumen = "No se pudo extraer resumen automático.";
+
+        // =====================================================================
+        // PASO 5: ANÁLISIS IA
+        // =====================================================================
+        if (errorLectura) {
+            materiaLegal = "Archivo Ilegible / Dañado";
+            resumen = "El documento tiene un formato no soportado, está dañado o protegido.";
+        } else {
+            try {
+                const promptInstrucciones = `
+                Eres un asistente legal en Chile.
+                1. tipoDocumento: (ej: Demanda, Contrato, Certificado, Resolución). Máximo 4 palabras.
+                2. resumen: Resumen ejecutivo (máximo 2 oraciones).
+                3. rutRepresentado: RUT principal (ej: 12345678-9). Si no hay, devuelve "".
+                4. nombreRepresentado: Nombre completo de la persona/empresa. Si no hay, devuelve "".
+                `;
+
+                const model = genAI.getGenerativeModel({
+                    model: "gemini-3.5-flash",
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        temperature: 0.1
+                    }
+                });
+
+                const result = await model.generateContent([promptInstrucciones, ...partesIA]);
+                const dataIA = JSON.parse(result.response.text());
+
+                materiaLegal = dataIA.tipoDocumento || materiaLegal;
+                resumen = dataIA.resumen || resumen;
+
+                const nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
+                const rutExtraido = dataIA.rutRepresentado ? dataIA.rutRepresentado.replace(/\./g, "").trim().split('-')[0] : "";
+
+                // CREACIÓN DE EXPEDIENTES A PRUEBA DE COLISIONES
+                if (nombreExtraido || rutExtraido) {
+                    // Si no tiene RUT, generamos uno aleatorio único para que no colapsen en la BD si subimos varios "SIN RUT"
+                    const rutSeguro = rutExtraido || `S-RUT-${crypto.randomBytes(3).toString('hex')}`;
+
+                    try {
+                        let representado = await prisma.representado.findFirst({
+                            where: {
+                                OR: [
+                                    ...(rutExtraido ? [{ rut: { contains: rutExtraido } }] : []),
+                                    ...(nombreExtraido ? [{ nombre: { equals: nombreExtraido, mode: 'insensitive' as const } }] : [])
+                                ]
+                            },
+                            include: { casos: true }
+                        });
+
+                        if (representado) {
+                            if (representado.casos && representado.casos.length > 0) {
+                                casoFinalId = representado.casos[0].id;
+                            } else {
+                                const nuevoCaso = await prisma.caso.create({
+                                    data: { representadoId: representado.id, areaJuridica: "CIVIL" }
+                                });
+                                casoFinalId = nuevoCaso.id;
+                            }
+                        } else {
+                            const nuevoRepresentado = await prisma.representado.create({
+                                data: {
+                                    nombre: nombreExtraido || "Nombre Desconocido",
+                                    rut: rutSeguro,
+                                    casos: { create: { areaJuridica: "CIVIL" } }
+                                },
+                                include: { casos: true }
+                            });
+                            casoFinalId = nuevoRepresentado.casos[0].id;
+                        }
+                    } catch (dbError: any) {
+                        // Si 2 hilos intentaron crear a la misma persona simultáneamente, ignoramos el choque y lo rescatamos
+                        if (dbError.code === 'P2002') {
+                            const repRescatado = await prisma.representado.findFirst({
+                                where: { rut: rutSeguro },
+                                include: { casos: true }
+                            });
+                            if (repRescatado && repRescatado.casos.length > 0) {
+                                casoFinalId = repRescatado.casos[0].id;
+                            }
+                        } else {
+                            throw dbError;
+                        }
+                    }
+                }
+            } catch (iaError: any) {
+                console.error("Error al clasificar con IA:", iaError);
+                materiaLegal = "Error de Análisis IA";
+                resumen = (iaError?.status === 503)
+                    ? "Los servidores de IA están saturados. Reintenta."
+                    : "Hubo un problema procesando el formato con Google Gemini.";
+            }
+        }
+
+        // =====================================================================
+        // PASO 6: GUARDAR EN BASE DE DATOS
+        // =====================================================================
+        const nuevoDocumento = await prisma.documento.create({
+            data: {
+                casoId: casoFinalId,
+                nombreArchivo: nombreArchivo,
+                urlR2: urlPublica,
+                materiaLegal: materiaLegal,
+                resumen: resumen,
+                hashArchivo: hashGenerado
+            }
+        });
+        // =====================================================================
+        // PASO 6: GUARDAR EN BASE DE DATOS (CON DEFENSA ANTI-COLISIÓN)
+        // =====================================================================
+        try {
+            const nuevoDocumento = await prisma.documento.create({
+                data: {
+                    casoId: casoFinalId,
+                    nombreArchivo: nombreArchivo,
+                    urlR2: urlPublica,
+                    materiaLegal: materiaLegal,
+                    resumen: resumen,
+                    hashArchivo: hashGenerado
+                }
+            });
+
+            return NextResponse.json({ exito: true, documento: nuevoDocumento });
+
+        } catch (errorDb: any) {
+            // Si el archivo se duplicó dentro del mismo lote (misma fracción de segundo)
+            if (errorDb.code === 'P2002' && errorDb.meta?.target?.includes('hashArchivo')) {
+                return NextResponse.json({
+                    error: `⚠️ Documento duplicado: Un archivo con este mismo contenido ya fue procesado.`
+                }, { status: 400 });
+            }
+            throw errorDb;
+        }
+
+    } catch (error) {
+        console.error("Error crítico en el endpoint POST:", error);
+        return NextResponse.json({ error: "Error interno al registrar el documento." }, { status: 500 });
+    }
+}
