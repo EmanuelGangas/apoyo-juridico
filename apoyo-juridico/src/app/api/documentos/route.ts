@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/app/lib/prisma";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { r2 } from "@/app/lib/r2";
 import crypto from "crypto";
 
@@ -277,8 +277,54 @@ export async function POST(request: Request) {
             throw errorDb;
         }
 
+
     } catch (error) {
         console.error("Error crítico en el endpoint POST:", error);
         return NextResponse.json({ error: "Error interno al registrar el documento." }, { status: 500 });
+    }
+}
+export async function DELETE(request: Request) {
+    try {
+        const body = await request.json();
+        const { id } = body;
+
+        if (!id) {
+            return NextResponse.json({ error: "ID de documento no proporcionado." }, { status: 400 });
+        }
+
+        // 1. Buscar el documento para obtener su URL de Cloudflare
+        const documento = await prisma.documento.findUnique({
+            where: { id: id }
+        });
+
+        if (!documento) {
+            return NextResponse.json({ error: "Documento no encontrado en la base de datos." }, { status: 404 });
+        }
+
+        // 2. Extraer la clave del archivo (Key) de la URL pública
+        // Ejemplo de URL: https://bucket.cuenta.r2.cloudflarestorage.com/clave-del-archivo.pdf
+        const urlPartes = documento.urlR2.split('.com/');
+        const claveArchivo = urlPartes.length > 1 ? urlPartes[1] : null;
+
+        // 3. Borrar físicamente de Cloudflare R2
+        if (claveArchivo) {
+            const comandoR2 = new DeleteObjectCommand({
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: claveArchivo,
+            });
+            await r2.send(comandoR2);
+        }
+
+        // 4. Borrado Físico Definitivo (Hard Delete) en Neon PostgreSQL
+        // Esto elimina el registro y libera el Hash SHA-256 para permitir futuras subidas
+        await prisma.documento.delete({
+            where: { id: id }
+        });
+
+        return NextResponse.json({ exito: true, mensaje: "Documento eliminado permanentemente." });
+
+    } catch (error) {
+        console.error("Error al eliminar el documento:", error);
+        return NextResponse.json({ error: "Error interno al intentar eliminar el documento." }, { status: 500 });
     }
 }
