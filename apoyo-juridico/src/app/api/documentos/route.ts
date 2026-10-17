@@ -132,7 +132,7 @@ export async function POST(request: Request) {
                 `;
 
                 const model = genAI.getGenerativeModel({
-                    model: "gemini-2.5-flash", // ✅ Modelo actual y soportado
+                    model: "gemini-3.8-flash", // ✅ Versión actual exigida por Google
                     generationConfig: {
                         responseMimeType: "application/json",
                         temperature: 0.1
