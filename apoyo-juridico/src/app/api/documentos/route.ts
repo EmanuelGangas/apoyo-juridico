@@ -132,7 +132,7 @@ export async function POST(request: Request) {
                 `;
 
                 const model = genAI.getGenerativeModel({
-                    model: "gemini-1.5-flash",
+                    model: "gemini-1.5-flash-latest", // ✅ Etiqueta dinámica agregada
                     generationConfig: {
                         responseMimeType: "application/json",
                         temperature: 0.1
