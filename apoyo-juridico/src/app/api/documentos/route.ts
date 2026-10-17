@@ -22,6 +22,16 @@ function obtenerMimeType(ext: string) {
     return 'text/plain';
 }
 
+// NUEVA FUNCIÓN: Formatea cualquier RUT al estándar XX.XXX.XXX-X
+function formatearRUT(rut: string) {
+    const cleanRut = rut.replace(/[^0-9kK]/g, '').toUpperCase();
+    if (cleanRut.length < 2) return cleanRut;
+    const body = cleanRut.slice(0, -1);
+    const dv = cleanRut.slice(-1);
+    const formattedBody = body.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+    return `${formattedBody}-${dv}`;
+}
+
 export async function GET() {
     try {
         const documentos = await prisma.documento.findMany({
@@ -40,9 +50,7 @@ export async function POST(request: Request) {
         const body = await request.json();
         const { nombreArchivo, claveArchivo } = body;
 
-        // =====================================================================
         // PASO 1: DESCARGAR ARCHIVO DE R2
-        // =====================================================================
         let buffer: Buffer;
         try {
             const comando = new GetObjectCommand({
@@ -59,9 +67,7 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "No se pudo obtener el archivo físico desde la nube." }, { status: 400 });
         }
 
-        // =====================================================================
         // PASO 2: VALIDACIÓN DE HASH (BLOQUEO DE DUPLICADOS)
-        // =====================================================================
         const hashGenerado = crypto.createHash('sha256').update(buffer).digest('hex');
 
         const documentoDuplicado = await prisma.documento.findUnique({
@@ -83,9 +89,7 @@ export async function POST(request: Request) {
         const partesIA: any[] = [];
         const ext = nombreArchivo.split('.').pop()?.toLowerCase() || "";
 
-        // =====================================================================
         // PASO 3: EXTRAER TEXTO O IMÁGENES
-        // =====================================================================
         try {
             if (['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
                 partesIA.push({
@@ -113,9 +117,7 @@ export async function POST(request: Request) {
         let nombreExtraido = "";
         let rutExtraido = "";
 
-        // =====================================================================
         // PASO 4: ANÁLISIS IA
-        // =====================================================================
         if (errorLectura) {
             materiaLegal = "Archivo Ilegible / Dañado";
             resumen = "El documento tiene un formato no soportado, está dañado o protegido.";
@@ -125,12 +127,12 @@ export async function POST(request: Request) {
                 Eres un asistente legal en Chile.
                 1. tipoDocumento: (ej: Demanda, Contrato, Certificado, Resolución). Máximo 4 palabras.
                 2. resumen: Resumen ejecutivo (máximo 2 oraciones).
-                3. rutRepresentado: RUT principal (ej: 12345678-9). Si no hay, devuelve "".
+                3. rutRepresentado: RUT completo de la persona/empresa, INCLUYENDO dígito verificador (ej: 12.345.678-9). Si no hay, devuelve "".
                 4. nombreRepresentado: Nombre completo de la persona/empresa. Si no hay, devuelve "".
                 `;
 
                 const model = genAI.getGenerativeModel({
-                    model: "gemini-1.5-flash", // ✅ VERSIÓN CORRECTA
+                    model: "gemini-1.5-flash",
                     generationConfig: {
                         responseMimeType: "application/json",
                         temperature: 0.1
@@ -144,7 +146,10 @@ export async function POST(request: Request) {
                 resumen = dataIA.resumen || resumen;
 
                 nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
-                rutExtraido = dataIA.rutRepresentado ? dataIA.rutRepresentado.replace(/\./g, "").trim().split('-')[0] : "";
+
+                // APLICAMOS EL FORMATO ESTRICTO AL RUT EXTRAÍDO POR LA IA
+                let rutRaw = dataIA.rutRepresentado ? dataIA.rutRepresentado.trim() : "";
+                rutExtraido = rutRaw ? formatearRUT(rutRaw) : "";
 
             } catch (iaError: any) {
                 console.error("Error al clasificar con IA:", iaError);
@@ -155,9 +160,7 @@ export async function POST(request: Request) {
             }
         }
 
-        // =====================================================================
-        // PASO 5: CREACIÓN DE EXPEDIENTES Y ASIGNACIÓN (SIN BANDEJA DE ENTRADA)
-        // =====================================================================
+        // PASO 5: CREACIÓN DE EXPEDIENTES Y ASIGNACIÓN
         let casoFinalId = "";
         const rutSeguro = rutExtraido || `S-RUT-${crypto.randomBytes(3).toString('hex')}`;
         const nombreFinal = nombreExtraido || "Sin Nombre";
@@ -166,7 +169,7 @@ export async function POST(request: Request) {
             let representado = await prisma.representado.findFirst({
                 where: {
                     OR: [
-                        ...(rutExtraido ? [{ rut: { contains: rutExtraido } }] : []),
+                        ...(rutExtraido ? [{ rut: rutExtraido }] : []),
                         ...(nombreExtraido ? [{ nombre: { equals: nombreExtraido, mode: 'insensitive' as const } }] : [])
                     ]
                 },
@@ -207,9 +210,7 @@ export async function POST(request: Request) {
             }
         }
 
-        // =====================================================================
-        // PASO 6: GUARDAR EN BASE DE DATOS (CON DEFENSA ANTI-COLISIÓN)
-        // =====================================================================
+        // PASO 6: GUARDAR EN BASE DE DATOS
         try {
             const nuevoDocumento = await prisma.documento.create({
                 data: {
@@ -225,7 +226,6 @@ export async function POST(request: Request) {
             return NextResponse.json({ exito: true, documento: nuevoDocumento });
 
         } catch (errorDb: any) {
-            // Si el archivo se duplicó dentro del mismo lote (misma fracción de segundo)
             if (errorDb.code === 'P2002' && errorDb.meta?.target?.includes('hashArchivo')) {
                 return NextResponse.json({
                     error: `⚠️ Documento duplicado: Un archivo con este mismo contenido ya fue procesado.`
@@ -233,7 +233,6 @@ export async function POST(request: Request) {
             }
             throw errorDb;
         }
-
 
     } catch (error) {
         console.error("Error crítico en el endpoint POST:", error);
@@ -250,7 +249,6 @@ export async function DELETE(request: Request) {
             return NextResponse.json({ error: "ID de documento no proporcionado." }, { status: 400 });
         }
 
-        // 1. Buscar el documento para obtener su URL de Cloudflare
         const documento = await prisma.documento.findUnique({
             where: { id: id }
         });
@@ -259,12 +257,9 @@ export async function DELETE(request: Request) {
             return NextResponse.json({ error: "Documento no encontrado en la base de datos." }, { status: 404 });
         }
 
-        // 2. Extraer la clave del archivo (Key) de la URL pública
-        // Ejemplo de URL: https://bucket.cuenta.r2.cloudflarestorage.com/clave-del-archivo.pdf
         const urlPartes = documento.urlR2.split('.com/');
         const claveArchivo = urlPartes.length > 1 ? urlPartes[1] : null;
 
-        // 3. Borrar físicamente de Cloudflare R2
         if (claveArchivo) {
             const comandoR2 = new DeleteObjectCommand({
                 Bucket: process.env.R2_BUCKET_NAME,
@@ -273,8 +268,6 @@ export async function DELETE(request: Request) {
             await r2.send(comandoR2);
         }
 
-        // 4. Borrado Físico Definitivo (Hard Delete) en Neon PostgreSQL
-        // Esto elimina el registro y libera el Hash SHA-256 para permitir futuras subidas
         await prisma.documento.delete({
             where: { id: id }
         });
