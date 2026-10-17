@@ -71,44 +71,11 @@ export async function POST(request: Request) {
 
         if (documentoDuplicado) {
             const nombreOriginal = documentoDuplicado.nombreArchivo;
-            const clienteAsociado = documentoDuplicado.caso?.representado?.nombre || "Bandeja de Entrada";
+            const clienteAsociado = documentoDuplicado.caso?.representado?.nombre || "Sin Nombre";
             return NextResponse.json({
                 error: `⚠️ Documento duplicado: Ya subido como "${nombreOriginal}" en el expediente de ${clienteAsociado}.`
             }, { status: 400 });
         }
-
-        // =====================================================================
-        // PASO 3: BANDEJA DE ENTRADA A PRUEBA DE CONCURRENCIA (HILOS MÚLTIPLES)
-        // =====================================================================
-        const rutBandeja = "00000000-0";
-        let casoFinalId = "";
-
-        // upsert: Si no existe lo crea, si ya existe en este milisegundo, lo usa.
-        const repTemp = await prisma.representado.upsert({
-            where: { rut: rutBandeja },
-            update: {},
-            create: { nombre: "Bandeja de Entrada", rut: rutBandeja }
-        });
-
-        let casoPorDefecto = await prisma.caso.findFirst({
-            where: { representadoId: repTemp.id }
-        });
-
-        if (!casoPorDefecto) {
-            try {
-                casoPorDefecto = await prisma.caso.create({
-                    data: { representadoId: repTemp.id, areaJuridica: "CIVIL" }
-                });
-            } catch (e) {
-                // En caso de que otro hilo justo lo creara, simplemente lo rescatamos
-                casoPorDefecto = await prisma.caso.findFirst({
-                    where: { representadoId: repTemp.id }
-                });
-            }
-        }
-
-        if (!casoPorDefecto) throw new Error("Fallo al crear o recuperar Bandeja de Entrada.");
-        casoFinalId = casoPorDefecto.id;
 
         const urlPublica = `https://${process.env.R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${claveArchivo}`;
 
@@ -117,7 +84,7 @@ export async function POST(request: Request) {
         const ext = nombreArchivo.split('.').pop()?.toLowerCase() || "";
 
         // =====================================================================
-        // PASO 4: EXTRAER TEXTO O IMÁGENES
+        // PASO 3: EXTRAER TEXTO O IMÁGENES
         // =====================================================================
         try {
             if (['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
@@ -143,9 +110,11 @@ export async function POST(request: Request) {
 
         let materiaLegal = "Documento sin clasificar";
         let resumen = "No se pudo extraer resumen automático.";
+        let nombreExtraido = "";
+        let rutExtraido = "";
 
         // =====================================================================
-        // PASO 5: ANÁLISIS IA
+        // PASO 4: ANÁLISIS IA
         // =====================================================================
         if (errorLectura) {
             materiaLegal = "Archivo Ilegible / Dañado";
@@ -174,60 +143,9 @@ export async function POST(request: Request) {
                 materiaLegal = dataIA.tipoDocumento || materiaLegal;
                 resumen = dataIA.resumen || resumen;
 
-                const nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
-                const rutExtraido = dataIA.rutRepresentado ? dataIA.rutRepresentado.replace(/\./g, "").trim().split('-')[0] : "";
+                nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
+                rutExtraido = dataIA.rutRepresentado ? dataIA.rutRepresentado.replace(/\./g, "").trim().split('-')[0] : "";
 
-                // CREACIÓN DE EXPEDIENTES A PRUEBA DE COLISIONES
-                if (nombreExtraido || rutExtraido) {
-                    // Si no tiene RUT, generamos uno aleatorio único para que no colapsen en la BD si subimos varios "SIN RUT"
-                    const rutSeguro = rutExtraido || `S-RUT-${crypto.randomBytes(3).toString('hex')}`;
-
-                    try {
-                        let representado = await prisma.representado.findFirst({
-                            where: {
-                                OR: [
-                                    ...(rutExtraido ? [{ rut: { contains: rutExtraido } }] : []),
-                                    ...(nombreExtraido ? [{ nombre: { equals: nombreExtraido, mode: 'insensitive' as const } }] : [])
-                                ]
-                            },
-                            include: { casos: true }
-                        });
-
-                        if (representado) {
-                            if (representado.casos && representado.casos.length > 0) {
-                                casoFinalId = representado.casos[0].id;
-                            } else {
-                                const nuevoCaso = await prisma.caso.create({
-                                    data: { representadoId: representado.id, areaJuridica: "CIVIL" }
-                                });
-                                casoFinalId = nuevoCaso.id;
-                            }
-                        } else {
-                            const nuevoRepresentado = await prisma.representado.create({
-                                data: {
-                                    nombre: nombreExtraido || "Nombre Desconocido",
-                                    rut: rutSeguro,
-                                    casos: { create: { areaJuridica: "CIVIL" } }
-                                },
-                                include: { casos: true }
-                            });
-                            casoFinalId = nuevoRepresentado.casos[0].id;
-                        }
-                    } catch (dbError: any) {
-                        // Si 2 hilos intentaron crear a la misma persona simultáneamente, ignoramos el choque y lo rescatamos
-                        if (dbError.code === 'P2002') {
-                            const repRescatado = await prisma.representado.findFirst({
-                                where: { rut: rutSeguro },
-                                include: { casos: true }
-                            });
-                            if (repRescatado && repRescatado.casos.length > 0) {
-                                casoFinalId = repRescatado.casos[0].id;
-                            }
-                        } else {
-                            throw dbError;
-                        }
-                    }
-                }
             } catch (iaError: any) {
                 console.error("Error al clasificar con IA:", iaError);
                 materiaLegal = "Error de Análisis IA";
@@ -238,18 +156,57 @@ export async function POST(request: Request) {
         }
 
         // =====================================================================
-        // PASO 6: GUARDAR EN BASE DE DATOS
+        // PASO 5: CREACIÓN DE EXPEDIENTES Y ASIGNACIÓN (SIN BANDEJA DE ENTRADA)
         // =====================================================================
-        const nuevoDocumento = await prisma.documento.create({
-            data: {
-                casoId: casoFinalId,
-                nombreArchivo: nombreArchivo,
-                urlR2: urlPublica,
-                materiaLegal: materiaLegal,
-                resumen: resumen,
-                hashArchivo: hashGenerado
+        let casoFinalId = "";
+        const rutSeguro = rutExtraido || `S-RUT-${crypto.randomBytes(3).toString('hex')}`;
+        const nombreFinal = nombreExtraido || "Sin Nombre";
+
+        try {
+            let representado = await prisma.representado.findFirst({
+                where: {
+                    OR: [
+                        ...(rutExtraido ? [{ rut: { contains: rutExtraido } }] : []),
+                        ...(nombreExtraido ? [{ nombre: { equals: nombreExtraido, mode: 'insensitive' as const } }] : [])
+                    ]
+                },
+                include: { casos: true }
+            });
+
+            if (representado) {
+                if (representado.casos && representado.casos.length > 0) {
+                    casoFinalId = representado.casos[0].id;
+                } else {
+                    const nuevoCaso = await prisma.caso.create({
+                        data: { representadoId: representado.id, areaJuridica: "CIVIL" }
+                    });
+                    casoFinalId = nuevoCaso.id;
+                }
+            } else {
+                const nuevoRepresentado = await prisma.representado.create({
+                    data: {
+                        nombre: nombreFinal,
+                        rut: rutSeguro,
+                        casos: { create: { areaJuridica: "CIVIL" } }
+                    },
+                    include: { casos: true }
+                });
+                casoFinalId = nuevoRepresentado.casos[0].id;
             }
-        });
+        } catch (dbError: any) {
+            if (dbError.code === 'P2002') {
+                const repRescatado = await prisma.representado.findFirst({
+                    where: { rut: rutSeguro },
+                    include: { casos: true }
+                });
+                if (repRescatado && repRescatado.casos.length > 0) {
+                    casoFinalId = repRescatado.casos[0].id;
+                }
+            } else {
+                throw dbError;
+            }
+        }
+
         // =====================================================================
         // PASO 6: GUARDAR EN BASE DE DATOS (CON DEFENSA ANTI-COLISIÓN)
         // =====================================================================
@@ -283,6 +240,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Error interno al registrar el documento." }, { status: 500 });
     }
 }
+
 export async function DELETE(request: Request) {
     try {
         const body = await request.json();
