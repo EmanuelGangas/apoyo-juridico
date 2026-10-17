@@ -156,7 +156,7 @@ export async function POST(request: Request) {
                 materiaLegal = "Error de Análisis IA";
                 resumen = (iaError?.status === 503)
                     ? "Los servidores de IA están saturados. Reintenta."
-                    : "Hubo un problema procesando el formato con Google Gemini.";
+                    : `ERROR REAL: ${iaError.message || JSON.stringify(iaError)}`
             }
         }
 
