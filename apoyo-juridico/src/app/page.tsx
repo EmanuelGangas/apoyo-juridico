@@ -208,7 +208,7 @@ export default function Dashboard() {
           cargarDatos();
 
           // Protección Anti-Bloqueo de Google (429)
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          await new Promise(resolve => setTimeout(resolve, 4000));
 
         } catch (error: any) {
           console.error("Error en archivo", item.file.name, error);
@@ -218,8 +218,8 @@ export default function Dashboard() {
       }
     };
 
-    // Procesamos de a 3 archivos simultáneamente
-    const hilosSimultaneos = Math.min(3, pendientes.length);
+    // Procesamos de a 1 archivo para no saturar la API gratuita de Gemini
+    const hilosSimultaneos = 1;
     await Promise.all(Array.from({ length: hilosSimultaneos }).map(() => procesarSiguiente()));
 
     setProcesandoLote(false);
