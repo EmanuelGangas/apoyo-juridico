@@ -12,7 +12,8 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 
-const genAI = new GoogleGenerativeAI(process.env.CLAVE_GEMINI_PROD || "");
+// Asegúrate de pegar toda tu clave completa manteniendo las comillas
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 function obtenerMimeType(ext: string) {
     if (ext === 'pdf') return 'application/pdf';
