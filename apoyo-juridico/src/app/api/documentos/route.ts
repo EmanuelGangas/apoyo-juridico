@@ -12,7 +12,9 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 
-// Asegúrate de pegar toda tu clave completa manteniendo las comillas
+// 1. PREVENCIÓN DE TIMEOUT: Obliga a Vercel a esperar hasta 60 segundos
+export const maxDuration = 60;
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 function obtenerMimeType(ext: string) {
@@ -23,7 +25,6 @@ function obtenerMimeType(ext: string) {
     return 'text/plain';
 }
 
-// NUEVA FUNCIÓN: Formatea cualquier RUT al estándar XX.XXX.XXX-X
 function formatearRUT(rut: string) {
     const cleanRut = rut.replace(/[^0-9kK]/g, '').toUpperCase();
     if (cleanRut.length < 2) return cleanRut;
@@ -84,7 +85,7 @@ export async function POST(request: Request) {
             }, { status: 400 });
         }
 
-        const urlPublica = `https://${process.env.R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${claveArchivo}`;
+        const urlPublica = `https://${process.env.R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}[.r2.cloudflarestorage.com/$](https://.r2.cloudflarestorage.com/$){claveArchivo}`;
 
         let errorLectura = false;
         const partesIA: any[] = [];
@@ -118,37 +119,47 @@ export async function POST(request: Request) {
         let nombreExtraido = "";
         let rutExtraido = "";
 
-        // PASO 4: ANÁLISIS IA
+        // PASO 4: ANÁLISIS IA BLINDADO
         if (errorLectura) {
             materiaLegal = "Archivo Ilegible / Dañado";
             resumen = "El documento tiene un formato no soportado, está dañado o protegido.";
         } else {
             try {
                 const promptInstrucciones = `
-                Eres un asistente legal en Chile.
-                1. tipoDocumento: (ej: Demanda, Contrato, Certificado, Resolución). Máximo 4 palabras.
-                2. resumen: Resumen ejecutivo (máximo 2 oraciones).
-                3. rutRepresentado: RUT completo de la persona/empresa, INCLUYENDO dígito verificador (ej: 12.345.678-9). Si no hay, devuelve "".
-                4. nombreRepresentado: Nombre completo de la persona/empresa. Si no hay, devuelve "".
-                `;
+                Eres un asistente legal en Chile. Analiza la información adjunta.
+                REGLAS ESTRICTAS:
+                1. DEBES devolver ÚNICAMENTE un objeto JSON válido.
+                2. NO uses formato markdown (ni \`\`\`json).
+                3. Utiliza EXACTAMENTE esta estructura:
+                {
+                  "tipoDocumento": "Categoría (ej: Demanda, Contrato, Certificado). Máximo 4 palabras",
+                  "resumen": "Resumen ejecutivo en máximo 2 oraciones",
+                  "rutRepresentado": "RUT completo con dígito verificador (ej: 12.345.678-9). Si no hay, devuelve ''",
+                  "nombreRepresentado": "Nombre completo de la persona/empresa. Si no hay, devuelve ''"
+                }`;
 
                 const model = genAI.getGenerativeModel({
-                    model: "gemini-3.8-flash", // ✅ Versión actual exigida por Google
+                    model: "gemini-3.8-flash",
                     generationConfig: {
                         responseMimeType: "application/json",
-                        temperature: 0.1
+                        temperature: 0.0, // Cero alucinaciones
+                        topK: 1,          // Respuesta directa
+                        topP: 0.1         // Máxima velocidad
                     }
                 });
 
                 const result = await model.generateContent([promptInstrucciones, ...partesIA]);
-                const dataIA = JSON.parse(result.response.text());
+                let textoRespuesta = result.response.text();
+
+                // Limpieza preventiva por si la IA envuelve el JSON en Markdown
+                textoRespuesta = textoRespuesta.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+                const dataIA = JSON.parse(textoRespuesta);
 
                 materiaLegal = dataIA.tipoDocumento || materiaLegal;
                 resumen = dataIA.resumen || resumen;
-
                 nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
 
-                // APLICAMOS EL FORMATO ESTRICTO AL RUT EXTRAÍDO POR LA IA
                 let rutRaw = dataIA.rutRepresentado ? dataIA.rutRepresentado.trim() : "";
                 rutExtraido = rutRaw ? formatearRUT(rutRaw) : "";
 
@@ -157,7 +168,7 @@ export async function POST(request: Request) {
                 materiaLegal = "Error de Análisis IA";
                 resumen = (iaError?.status === 503)
                     ? "Los servidores de IA están saturados. Reintenta."
-                    : `ERROR REAL: ${iaError.message || JSON.stringify(iaError)}`
+                    : `ERROR REAL: ${iaError.message || "Fallo en parseo de JSON"}`;
             }
         }
 
