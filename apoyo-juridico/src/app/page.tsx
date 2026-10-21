@@ -194,7 +194,9 @@ export default function Dashboard() {
           procesados++;
           cargarDatos();
 
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // Pausa estratégica de 6 segundos entre cada documento para no saturar 
+          // el límite gratuito (Free Tier) de Google Gemini API
+          await new Promise(resolve => setTimeout(resolve, 6000));
 
         } catch (error: any) {
           actualizarEstadoLote(item.id, 'error', error.message || "Fallo");
