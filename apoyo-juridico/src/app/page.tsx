@@ -14,6 +14,7 @@ interface ArchivoLote {
   file: globalThis.File;
   estado: EstadoArchivo;
   detalle?: string;
+  areaJuridica?: string;
 }
 
 export default function Dashboard() {
@@ -37,7 +38,7 @@ export default function Dashboard() {
   const [carpetaSeleccionadaId, setCarpetaSeleccionadaId] = useState<string | null>(null);
   const [categoriaSeleccionada, setCategoriaSeleccionada] = useState<string | null>(null);
 
-  // Estados Edición de Documentos
+  // Estados Edición
   const [docEditando, setDocEditando] = useState<any | null>(null);
   const [nuevoNombre, setNuevoNombre] = useState("");
   const [nuevoCasoId, setNuevoCasoId] = useState("");
@@ -45,7 +46,6 @@ export default function Dashboard() {
   const [nuevasNotasDoc, setNuevasNotasDoc] = useState("");
   const [docAEliminar, setDocAEliminar] = useState<string | null>(null);
 
-  // Estados Edición de Casos
   const [casoEditando, setCasoEditando] = useState<any | null>(null);
   const [nuevoNombreRepresentado, setNuevoNombreRepresentado] = useState("");
   const [nuevoRutRepresentado, setNuevoRutRepresentado] = useState("");
@@ -60,7 +60,7 @@ export default function Dashboard() {
     setNotificacion({ tipo, mensaje });
     setTimeout(() => setNotificacion(null), 4000);
   };
-  // Pega esto debajo de mostrarNotificacion (Aprox línea 71)
+
   const formatearRUT = (valor: string) => {
     const cleanRut = valor.replace(/[^0-9kK]/g, '').toUpperCase();
     if (cleanRut.length < 2) return cleanRut;
@@ -90,7 +90,6 @@ export default function Dashboard() {
 
   if (!mounted) return null;
 
-  // --- SUBIDA INDIVIDUAL ---
   const manejarSubidaAutonoma = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!archivo) return;
@@ -116,21 +115,17 @@ export default function Dashboard() {
 
       const dataResBd = await resBd.json();
 
-      if (!resBd.ok) {
-        throw new Error(dataResBd.error || "Error al procesar el documento en la base de datos.");
-      }
+      if (!resBd.ok) throw new Error(dataResBd.error || "Error al procesar el documento en BD.");
 
       setEstadoSubida("exito");
       cargarDatos();
       mostrarNotificacion("exito", "Documento procesado y clasificado con IA.");
     } catch (error: any) {
-      console.error(error);
       setEstadoSubida("error");
       mostrarNotificacion("error", error.message || "Error al procesar el documento.");
     }
   };
 
-  // --- PROCESAMIENTO MASIVO ---
   const manejarSeleccionArchivosMasivos = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const permitidas = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'jpg', 'jpeg', 'png', 'webp'];
@@ -141,7 +136,7 @@ export default function Dashboard() {
         if (ext && permitidas.includes(ext)) {
           nuevosArchivos.push({ id: Math.random().toString(36).substring(7), file, estado: 'esperando' });
         } else {
-          mostrarNotificacion("error", `El formato de "${file.name}" no está permitido.`);
+          mostrarNotificacion("error", `Formato de "${file.name}" no permitido.`);
         }
       });
       setLote(prev => [...prev, ...nuevosArchivos]);
@@ -149,24 +144,18 @@ export default function Dashboard() {
     e.target.value = "";
   };
 
-  const eliminarDelLote = (id: string) => {
-    setLote(prev => prev.filter(a => a.id !== id));
+  const eliminarDelLote = (id: string) => setLote(prev => prev.filter(a => a.id !== id));
+
+  const actualizarEstadoLote = (id: string, estado: EstadoArchivo, detalle?: string, area?: string) => {
+    setLote(prev => prev.map(a => a.id === id ? { ...a, estado, detalle: detalle || a.detalle, areaJuridica: area || a.areaJuridica } : a));
   };
 
-  const actualizarEstadoLote = (id: string, estado: EstadoArchivo, detalle?: string) => {
-    setLote(prev => prev.map(a => a.id === id ? { ...a, estado, detalle: detalle || a.detalle } : a));
-  };
-
-  // ==========================================================
-  // CARGA MASIVA - MULTIHILO PROTEGIDO (NUEVO)
-  // ==========================================================
   const procesarLote = async () => {
     if (lote.length === 0 || procesandoLote) return;
     setProcesandoLote(true);
 
     let procesados = 0;
     let conError = 0;
-
     const pendientes = lote.filter(a => a.estado === 'esperando');
     let index = 0;
 
@@ -181,11 +170,11 @@ export default function Dashboard() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ nombreArchivo: item.file.name, tipoArchivo: item.file.type }),
           });
-          if (!resTicket.ok) throw new Error("Error al contactar con la nube segura.");
+          if (!resTicket.ok) throw new Error("Error ticket nube");
           const { urlDeSubida, claveArchivo } = await resTicket.json();
 
           const resSubida = await fetch(urlDeSubida, { method: "PUT", body: item.file, headers: { "Content-Type": item.file.type } });
-          if (!resSubida.ok) throw new Error("Error subiendo el archivo físico.");
+          if (!resSubida.ok) throw new Error("Error subida archivo");
 
           actualizarEstadoLote(item.id, 'analizando');
 
@@ -196,29 +185,27 @@ export default function Dashboard() {
           });
 
           if (!resBd.ok) {
-            const errorData = await resBd.json();
-            throw new Error(errorData.error || "Fallo en el motor de IA.");
+            const errData = await resBd.json();
+            throw new Error(errData.error || "Fallo IA");
           }
 
           const dataBd = await resBd.json();
-          actualizarEstadoLote(item.id, 'exito', dataBd.documento?.materiaLegal || "Procesado");
-          procesados++;
+          const docRes = dataBd.documento;
+          const casoArea = docRes?.casoId ? casos.find(c => c.id === docRes.casoId)?.areaJuridica : "CIVIL";
 
-          // Sincroniza al instante para que lo veas en la tabla global
+          actualizarEstadoLote(item.id, 'exito', docRes?.materiaLegal || "Procesado", casoArea);
+          procesados++;
           cargarDatos();
 
-          // Protección Anti-Bloqueo de Google (429)
-          await new Promise(resolve => setTimeout(resolve, 4000));
+          await new Promise(resolve => setTimeout(resolve, 3000));
 
         } catch (error: any) {
-          console.error("Error en archivo", item.file.name, error);
-          actualizarEstadoLote(item.id, 'error', error.message || "Fallo en el procesamiento");
+          actualizarEstadoLote(item.id, 'error', error.message || "Fallo");
           conError++;
         }
       }
     };
 
-    // Procesamos de a 1 archivo para no saturar la API gratuita de Gemini
     const hilosSimultaneos = 1;
     await Promise.all(Array.from({ length: hilosSimultaneos }).map(() => procesarSiguiente()));
 
@@ -226,46 +213,30 @@ export default function Dashboard() {
     cargarDatos();
 
     if (conError === 0) {
-      mostrarNotificacion("exito", `¡Procesamiento completado! (${procesados} archivos)`);
+      mostrarNotificacion("exito", `¡Completado! (${procesados} archivos)`);
     } else {
-      mostrarNotificacion("error", `Proceso finalizado. ${procesados} exitosos, ${conError} con error o duplicados.`);
+      mostrarNotificacion("error", `${procesados} exitosos, ${conError} con error.`);
     }
   };
 
-  const limpiarLoteCompletado = () => {
-    setLote([]); // Vacía por completo la lista para empezar de nuevo
-  };
-
+  const limpiarLoteCompletado = () => setLote([]);
   const progresoActual = lote.length > 0 ? Math.round((lote.filter(a => a.estado === 'exito' || a.estado === 'error').length / lote.length) * 100) : 0;
 
   const carpetaActiva = casos.find(c => c.id === carpetaSeleccionadaId);
   const toggleExpandir = (docId: string) => setResumenesExpandidos(prev => ({ ...prev, [docId]: !prev[docId] }));
 
-
-  // ==========================================================
-  // ACTUALIZACIONES OPTIMISTAS (UI INSTANTÁNEA)
-  // ==========================================================
   const ejecutarEliminacion = async () => {
     if (!docAEliminar) return;
-    const idAEliminar = docAEliminar;
-
-    // Ocultar modal al instante
+    const id = docAEliminar;
     setDocAEliminar(null);
-
-    // Borrar de la interfaz visualmente al instante
-    setDocumentosGlobales(prev => prev.filter(doc => doc.id !== idAEliminar));
-    setCasos(prev => prev.map(c => ({
-      ...c, documentos: c.documentos?.filter((d: any) => d.id !== idAEliminar)
-    })));
-
+    setDocumentosGlobales(prev => prev.filter(doc => doc.id !== id));
+    setCasos(prev => prev.map(c => ({ ...c, documentos: c.documentos?.filter((d: any) => d.id !== id) })));
     try {
-      const res = await fetch(`/api/documentos/${idAEliminar}`, { method: "DELETE" });
-      if (res.ok) {
-        mostrarNotificacion("exito", "Documento eliminado.");
-        cargarDatos();
-      } else { throw new Error(); }
-    } catch (error) {
-      mostrarNotificacion("error", "Error al eliminar. Revertiendo cambios.");
+      const res = await fetch(`/api/documentos/${id}`, { method: "DELETE" });
+      if (res.ok) mostrarNotificacion("exito", "Documento eliminado.");
+      else throw new Error();
+    } catch {
+      mostrarNotificacion("error", "Error. Revertiendo.");
       cargarDatos();
     }
   };
@@ -273,28 +244,19 @@ export default function Dashboard() {
   const guardarEdicion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!docEditando) return;
-
-    const idEditar = docEditando.id;
-    setDocEditando(null); // Ocultar Modal al instante
-
-    // Actualización visual instantánea
-    setDocumentosGlobales(prev => prev.map(doc => doc.id === idEditar ? { ...doc, nombreArchivo: nuevoNombre, resumen: nuevoResumen, notas: nuevasNotasDoc } : doc));
-    setCasos(prev => prev.map(c => ({
-      ...c, documentos: c.documentos?.map((d: any) => d.id === idEditar ? { ...d, nombreArchivo: nuevoNombre, resumen: nuevoResumen, notas: nuevasNotasDoc } : d)
-    })));
-
+    const id = docEditando.id;
+    setDocEditando(null);
+    setDocumentosGlobales(prev => prev.map(doc => doc.id === id ? { ...doc, nombreArchivo: nuevoNombre, resumen: nuevoResumen, notas: nuevasNotasDoc } : doc));
     try {
-      const res = await fetch(`/api/documentos/${idEditar}`, {
+      const res = await fetch(`/api/documentos/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nombreArchivo: nuevoNombre, casoId: nuevoCasoId, resumen: nuevoResumen, notas: nuevasNotasDoc })
       });
-      if (res.ok) {
-        mostrarNotificacion("exito", "Documento actualizado al instante.");
-        cargarDatos();
-      } else { throw new Error(); }
-    } catch (error) {
-      mostrarNotificacion("error", "Error al guardar los cambios.");
+      if (res.ok) mostrarNotificacion("exito", "Actualizado.");
+      else throw new Error();
+    } catch {
+      mostrarNotificacion("error", "Error al guardar.");
       cargarDatos();
     }
   };
@@ -302,21 +264,14 @@ export default function Dashboard() {
   const guardarEdicionCaso = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!casoEditando) return;
-
-    const idEditar = casoEditando.id;
-    setCasoEditando(null); // Ocultar Modal al instante
-
-    // Actualización optimista del expediente en la UI
-    setCasos(prev => prev.map(c => c.id === idEditar ? {
-      ...c,
-      representado: { ...c.representado, nombre: nuevoNombreRepresentado, rut: nuevoRutRepresentado },
-      areaJuridica: nuevaAreaJuridica,
-      estadoCausa: nuevoEstadoCausa,
-      notas: nuevasNotasCaso
+    const id = casoEditando.id;
+    setCasoEditando(null);
+    setCasos(prev => prev.map(c => c.id === id ? {
+      ...c, representado: { ...c.representado, nombre: nuevoNombreRepresentado, rut: nuevoRutRepresentado },
+      areaJuridica: nuevaAreaJuridica, estadoCausa: nuevoEstadoCausa, notas: nuevasNotasCaso
     } : c));
-
     try {
-      const res = await fetch(`/api/casos/${idEditar}`, {
+      const res = await fetch(`/api/casos/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nombreRepresentado: nuevoNombreRepresentado, rutRepresentado: nuevoRutRepresentado, areaJuridica: nuevaAreaJuridica, estadoCausa: nuevoEstadoCausa, notas: nuevasNotasCaso, representadoId: casoEditando.representado?.id || casoEditando.representadoId })
@@ -325,37 +280,28 @@ export default function Dashboard() {
         cargarDatos();
         mostrarNotificacion("exito", "Expediente actualizado.");
       } else {
-        const dataError = await res.json();
-        mostrarNotificacion("error", dataError.error || "Error al actualizar.");
+        const data = await res.json();
+        mostrarNotificacion("error", data.error || "Error.");
         cargarDatos();
       }
-    } catch (error) {
-      mostrarNotificacion("error", "Error interno al actualizar expediente.");
+    } catch {
+      mostrarNotificacion("error", "Error interno.");
       cargarDatos();
     }
   };
 
   const ejecutarEliminacionCaso = async () => {
     if (!casoAEliminar) return;
-    const idAEliminar = casoAEliminar;
-
-    if (carpetaSeleccionadaId === idAEliminar) {
-      setVentanaActiva("causas");
-      setCarpetaSeleccionadaId(null);
-    }
-
-    // Ocultar modal y borrar carpeta visualmente al instante
+    const id = casoAEliminar;
+    if (carpetaSeleccionadaId === id) { setVentanaActiva("causas"); setCarpetaSeleccionadaId(null); }
     setCasoAEliminar(null);
-    setCasos(prev => prev.filter(c => c.id !== idAEliminar));
-
+    setCasos(prev => prev.filter(c => c.id !== id));
     try {
-      const res = await fetch(`/api/casos/${idAEliminar}`, { method: "DELETE" });
-      if (res.ok) {
-        mostrarNotificacion("exito", "Carpeta eliminada permanentemente.");
-        cargarDatos();
-      } else { throw new Error(); }
-    } catch (error) {
-      mostrarNotificacion("error", "Error al intentar borrar la carpeta.");
+      const res = await fetch(`/api/casos/${id}`, { method: "DELETE" });
+      if (res.ok) mostrarNotificacion("exito", "Carpeta eliminada.");
+      else throw new Error();
+    } catch {
+      mostrarNotificacion("error", "Error.");
       cargarDatos();
     }
   };
@@ -395,8 +341,6 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-slate-100/70 flex flex-col lg:flex-row font-sans text-slate-800 antialiased relative">
-
-      {/* BARRA DE NAVEGACIÓN SUPERIOR PARA MÓVILES Y TABLETS */}
       <div className="lg:hidden bg-slate-900 text-white p-4 flex flex-col gap-3 shadow-md z-20">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -413,7 +357,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* PANEL LATERAL DEL DASHBOARD (ESCRITORIO) */}
       <aside className="w-72 bg-slate-900 text-slate-300 p-6 hidden lg:flex flex-col shadow-2xl border-r border-slate-800 shrink-0 relative z-10">
         <div className="flex items-center gap-3.5 mb-10 px-2">
           <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 text-white p-3 rounded-2xl shadow-lg shadow-blue-500/20"><FolderOpen size={24} /></div>
@@ -439,8 +382,6 @@ export default function Dashboard() {
       </aside>
 
       <main className="flex-1 p-4 sm:p-6 md:p-10 overflow-y-auto relative z-0 min-w-0">
-
-        {/* -------------------- 1. VENTANA PRINCIPAL: SUBIDA INDIVIDUAL -------------------- */}
         {ventanaActiva === "subida" && (
           <div className="max-w-2xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
@@ -448,35 +389,13 @@ export default function Dashboard() {
               <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mt-3 tracking-tight">Carga de Documentos</h2>
               <p className="text-slate-500 mt-2 text-sm md:text-base">Carga un documento legal para clasificación y análisis inmediato.</p>
             </header>
-
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xl shadow-slate-200/50 p-6 sm:p-8 md:p-10 backdrop-blur-xl">
               <form onSubmit={manejarSubidaAutonoma} className="space-y-6">
                 <div className={`border-2 border-dashed rounded-3xl p-8 sm:p-10 text-center transition-all cursor-pointer relative group ${errorValidacion ? "border-rose-300 bg-rose-50" : "border-blue-200 bg-gradient-to-b from-blue-50/50 to-indigo-50/30 hover:border-blue-400"}`}>
-                  <input
-                    type="file"
-                    accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.jpg,.jpeg,.png,.webp"
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                    onChange={(e) => {
-                      setErrorValidacion(null);
-                      if (e.target.files && e.target.files.length > 0) {
-                        const file = e.target.files[0];
-                        const ext = file.name.split('.').pop()?.toLowerCase();
-                        const permitidas = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'jpg', 'jpeg', 'png', 'webp'];
-                        if (!ext || !permitidas.includes(ext)) {
-                          setErrorValidacion(`Formato .${ext} no permitido.`);
-                          setArchivo(null);
-                          return;
-                        }
-                        setArchivo(file);
-                        setEstadoSubida("esperando");
-                      }
-                    }}
-                  />
+                  <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.jpg,.jpeg,.png,.webp" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" onChange={(e) => { setErrorValidacion(null); if (e.target.files && e.target.files.length > 0) { const file = e.target.files[0]; const ext = file.name.split('.').pop()?.toLowerCase(); const permitidas = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'txt', 'jpg', 'jpeg', 'png', 'webp']; if (!ext || !permitidas.includes(ext)) { setErrorValidacion(`Formato .${ext} no permitido.`); setArchivo(null); return; } setArchivo(file); setEstadoSubida("esperando"); } }} />
                   {archivo ? (
                     <div className="flex flex-col items-center gap-3">
-                      <div className="bg-blue-600 text-white p-4 rounded-2xl shadow-md">
-                        {getFileIcon(archivo.name, 32)}
-                      </div>
+                      <div className="bg-blue-600 text-white p-4 rounded-2xl shadow-md">{getFileIcon(archivo.name, 32)}</div>
                       <span className="text-slate-900 font-bold text-base sm:text-lg truncate max-w-full px-4">{archivo.name}</span>
                     </div>
                   ) : (
@@ -497,7 +416,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* -------------------- 2. VENTANA DEDICADA: CARGA MASIVA -------------------- */}
         {ventanaActiva === "subida-masiva" && (
           <div className="max-w-4xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
@@ -505,24 +423,16 @@ export default function Dashboard() {
               <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mt-3 tracking-tight">Carga Masiva de Documentos</h2>
               <p className="text-slate-500 mt-2 text-sm md:text-base font-medium max-w-xl mx-auto">Sube 2 o más documentos de cualquier cliente. El motor de IA clasificará cada uno, asociándolo a su causa o creando un nuevo expediente.</p>
             </header>
-
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xl shadow-slate-200/50 overflow-hidden backdrop-blur-xl">
               <div className={`transition-all p-6 sm:p-8 ${lote.length > 0 ? "bg-slate-50 border-b border-slate-200" : "p-8 sm:p-12"}`}>
                 <div className={`border-2 border-dashed rounded-3xl text-center transition-all cursor-pointer relative group ${procesandoLote ? "opacity-50 pointer-events-none" : ""} ${lote.length > 0 ? "border-slate-300 bg-white hover:border-blue-400 p-6" : "border-indigo-200 bg-gradient-to-b from-indigo-50/40 to-blue-50/30 hover:border-indigo-400 p-10 sm:p-16"}`}>
                   <input type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.jpg,.jpeg,.png,.webp" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" onChange={manejarSeleccionArchivosMasivos} disabled={procesandoLote} />
                   {lote.length > 0 ? (
-                    <div className="flex items-center justify-center gap-3 text-slate-600 text-sm sm:text-base font-bold group-hover:text-blue-600 transition-colors">
-                      <Plus size={22} /> Agregar más archivos a la cola
-                    </div>
+                    <div className="flex items-center justify-center gap-3 text-slate-600 text-sm sm:text-base font-bold group-hover:text-blue-600 transition-colors"><Plus size={22} /> Agregar más archivos a la cola</div>
                   ) : (
                     <div className="text-slate-500 space-y-4 pointer-events-none">
-                      <div className="w-16 h-16 sm:w-20 sm:h-20 bg-indigo-100 text-indigo-600 rounded-3xl flex items-center justify-center mx-auto transition-transform group-hover:scale-110 shadow-inner">
-                        <Layers size={34} />
-                      </div>
-                      <div className="text-base sm:text-lg">
-                        <span className="font-extrabold text-indigo-600">Selecciona o arrastra</span>
-                        <span> múltiples documentos aquí</span>
-                      </div>
+                      <div className="w-16 h-16 sm:w-20 sm:h-20 bg-indigo-100 text-indigo-600 rounded-3xl flex items-center justify-center mx-auto transition-transform group-hover:scale-110 shadow-inner"><Layers size={34} /></div>
+                      <div className="text-base sm:text-lg"><span className="font-extrabold text-indigo-600">Selecciona o arrastra</span><span> múltiples documentos aquí</span></div>
                       <p className="text-xs sm:text-sm text-slate-400 font-medium">Soporta PDF, Word, Excel e Imágenes sin límite de archivos.</p>
                     </div>
                   )}
@@ -552,9 +462,14 @@ export default function Dashboard() {
                             <h4 className="font-bold text-slate-800 text-sm truncate">{item.file.name}</h4>
                             <div className="flex items-center gap-2 mt-1">
                               {item.estado === 'esperando' && <span className="text-xs font-semibold text-slate-400">En cola</span>}
-                              {item.estado === 'subiendo' && <span className="text-xs font-semibold text-blue-600">Subiendo a Cloudflare R2...</span>}
+                              {item.estado === 'subiendo' && <span className="text-xs font-semibold text-blue-600">Subiendo a R2...</span>}
                               {item.estado === 'analizando' && <span className="text-xs font-semibold text-indigo-600 flex items-center gap-1"><Sparkles size={12} /> Analizando con IA...</span>}
-                              {item.estado === 'exito' && <span className="inline-flex items-center text-xs font-semibold text-emerald-700 bg-emerald-100/80 px-2.5 py-0.5 rounded-lg">Clasificado: {item.detalle}</span>}
+                              {item.estado === 'exito' && (
+                                <div className="flex gap-2">
+                                  <span className="inline-flex items-center text-xs font-bold text-emerald-700 bg-emerald-100/80 px-2.5 py-0.5 rounded-lg border border-emerald-200">{item.detalle}</span>
+                                  <span className="inline-flex items-center text-xs font-bold text-blue-700 bg-blue-100/80 px-2.5 py-0.5 rounded-lg border border-blue-200">Área: {item.areaJuridica || "CIVIL"}</span>
+                                </div>
+                              )}
                               {item.estado === 'error' && <span className="text-xs font-semibold text-rose-600">{item.detalle}</span>}
                             </div>
                           </div>
@@ -567,9 +482,7 @@ export default function Dashboard() {
                   </div>
 
                   <div className="p-6 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row gap-4 items-center justify-between rounded-b-3xl">
-                    <div className="text-sm font-semibold text-slate-500">
-                      Total: <span className="text-slate-900 font-bold">{lote.length}</span> documentos seleccionados.
-                    </div>
+                    <div className="text-sm font-semibold text-slate-500">Total: <span className="text-slate-900 font-bold">{lote.length}</span> documentos seleccionados.</div>
                     <div className="flex gap-3 w-full sm:w-auto">
                       {lote.every(a => a.estado === 'exito' || a.estado === 'error') ? (
                         <button onClick={limpiarLoteCompletado} className="flex-1 sm:flex-none px-6 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-sm font-bold transition-all">Limpiar Lista</button>
@@ -589,7 +502,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* -------------------- 3. GESTIÓN GLOBAL DE DOCUMENTOS (TABLA CORREGIDA Y RESPONSIVA) -------------------- */}
         {ventanaActiva === "documentos" && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
             <header className="mb-6 md:mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -617,65 +529,29 @@ export default function Dashboard() {
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {documentosFiltradosVentana2.map((doc) => (
                       <tr key={doc.id} className="hover:bg-slate-50/70 transition-colors group">
-                        {/* COLUMNA 1: DOCUMENTO Y RESUMEN */}
                         <td className="py-4 px-6 align-top">
                           <a href={`/api/documentos/${doc.id}/ver`} target="_blank" rel="noopener noreferrer" className="font-bold text-slate-900 hover:text-blue-600 flex items-center gap-3 transition-colors">
-                            <div className="p-2 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors shrink-0">
-                              {getFileIcon(doc.nombreArchivo, 18)}
-                            </div>
+                            <div className="p-2 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors shrink-0">{getFileIcon(doc.nombreArchivo, 18)}</div>
                             <span className="truncate text-sm font-bold">{doc.nombreArchivo}</span>
                           </a>
                           <div className="pl-11 mt-1.5 pr-2">
-                            <p className={`text-xs text-slate-500 leading-relaxed transition-all duration-300 ${resumenesExpandidos[doc.id] ? "whitespace-pre-wrap" : "line-clamp-1"}`}>
-                              <span className="font-semibold text-slate-700">Resumen:</span> {doc.resumen}
-                            </p>
-                            {doc.notas && (
-                              <p className="text-xs text-amber-800 bg-amber-50/80 px-2.5 py-1.5 rounded-lg mt-2 border border-amber-200/70 leading-relaxed">
-                                <span className="font-bold">Notas:</span> {doc.notas}
-                              </p>
-                            )}
-                            <button onClick={() => toggleExpandir(doc.id)} className="text-[11px] font-bold text-blue-600 hover:text-blue-800 mt-1.5 inline-flex items-center gap-1 transition-colors">
-                              {resumenesExpandidos[doc.id] ? <><ChevronUp size={13} /> Minimizar</> : <><ChevronDown size={13} /> Leer completo</>}
-                            </button>
+                            <p className={`text-xs text-slate-500 leading-relaxed transition-all duration-300 ${resumenesExpandidos[doc.id] ? "whitespace-pre-wrap" : "line-clamp-1"}`}><span className="font-semibold text-slate-700">Resumen:</span> {doc.resumen}</p>
+                            {doc.notas && <p className="text-xs text-amber-800 bg-amber-50/80 px-2.5 py-1.5 rounded-lg mt-2 border border-amber-200/70 leading-relaxed"><span className="font-bold">Notas:</span> {doc.notas}</p>}
+                            <button onClick={() => toggleExpandir(doc.id)} className="text-[11px] font-bold text-blue-600 hover:text-blue-800 mt-1.5 inline-flex items-center gap-1 transition-colors">{resumenesExpandidos[doc.id] ? <><ChevronUp size={13} /> Minimizar</> : <><ChevronDown size={13} /> Leer completo</>}</button>
                           </div>
                         </td>
-
-                        {/* COLUMNA 2: REPRESENTADO / CAUSA */}
                         <td className="py-4 px-5 align-middle">
-                          <span className="font-semibold text-slate-800 text-sm leading-snug block break-words">
-                            {doc.caso?.representado?.nombre || "Sin Nombre"}
-                          </span>
-                          {doc.caso?.representado?.rut && (
-                            <span className="text-xs text-slate-400 font-medium mt-0.5 block">
-                              RUT: {doc.caso.representado.rut}
-                            </span>
-                          )}
+                          <span className="font-semibold text-slate-800 text-sm leading-snug block break-words">{doc.caso?.representado?.nombre || "Sin Nombre"}</span>
+                          {doc.caso?.representado?.rut && <span className="text-xs text-slate-400 font-medium mt-0.5 block">RUT: {doc.caso.representado.rut}</span>}
+                          {doc.caso?.areaJuridica && <span className="text-[10px] font-bold mt-1 text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md inline-block border border-slate-200">{doc.caso.areaJuridica}</span>}
                         </td>
-
-                        {/* COLUMNA 3: CLASIFICACIÓN IA */}
                         <td className="py-4 px-5 align-middle">
-                          <span className="inline-flex items-center justify-center text-center text-xs font-semibold px-3 py-1.5 rounded-xl border bg-indigo-50/90 text-indigo-700 border-indigo-200/70 leading-tight max-w-full">
-                            {doc.materiaLegal || "Documento"}
-                          </span>
+                          <span className="inline-flex items-center justify-center text-center text-xs font-semibold px-3 py-1.5 rounded-xl border bg-indigo-50/90 text-indigo-700 border-indigo-200/70 leading-tight max-w-full">{doc.materiaLegal || "Documento"}</span>
                         </td>
-
-                        {/* COLUMNA 4: ACCIONES */}
                         <td className="py-4 px-6 align-middle text-right whitespace-nowrap">
                           <div className="inline-flex items-center justify-end gap-1">
-                            <button
-                              onClick={() => { setDocEditando(doc); setNuevoNombre(doc.nombreArchivo); setNuevoCasoId(doc.casoId); setNuevoResumen(doc.resumen || ""); setNuevasNotasDoc(doc.notas || ""); }}
-                              className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
-                              title="Editar"
-                            >
-                              <Edit3 size={17} />
-                            </button>
-                            <button
-                              onClick={() => setDocAEliminar(doc.id)}
-                              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
-                              title="Eliminar"
-                            >
-                              <Trash2 size={17} />
-                            </button>
+                            <button onClick={() => { setDocEditando(doc); setNuevoNombre(doc.nombreArchivo); setNuevoCasoId(doc.casoId); setNuevoResumen(doc.resumen || ""); setNuevasNotasDoc(doc.notas || ""); }} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all" title="Editar"><Edit3 size={17} /></button>
+                            <button onClick={() => setDocAEliminar(doc.id)} className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all" title="Eliminar"><Trash2 size={17} /></button>
                           </div>
                         </td>
                       </tr>
@@ -687,7 +563,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* -------------------- 4. CAUSAS Y REPRESENTADOS -------------------- */}
         {ventanaActiva === "causas" && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
             <header className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -744,7 +619,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* -------------------- 5. DETALLE DE CATEGORÍA (VER TODAS) -------------------- */}
         {ventanaActiva === "detalle-categoria" && categoriaSeleccionada && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
             <button onClick={() => setVentanaActiva("causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> Volver a Causas</button>
@@ -764,7 +638,6 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* -------------------- 6. DETALLE DE CARPETA -------------------- */}
         {ventanaActiva === "detalle-carpeta" && carpetaActiva && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
             <button onClick={() => setVentanaActiva(categoriaSeleccionada ? "detalle-categoria" : "causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> {categoriaSeleccionada ? `Volver a ${categoriaSeleccionada}` : "Volver a Causas"}</button>
@@ -775,6 +648,7 @@ export default function Dashboard() {
                   <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight break-words">{carpetaActiva.representado?.nombre || "Sin Nombre"}</h2>
                   <div className="flex flex-wrap items-center gap-2.5 mt-2 text-xs sm:text-sm">
                     <span className="font-semibold text-slate-600 bg-slate-100 px-3 py-1 rounded-lg">RUT: {carpetaActiva.representado?.rut || "N/A"}</span>
+                    <span className="font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-1 rounded-lg">{carpetaActiva.areaJuridica}</span>
                     <span className={`inline-flex items-center font-bold px-3 py-1 rounded-lg border text-xs ${getStatusColor(carpetaActiva.estadoCausa || "INGRESADO")}`}>{formatEnumText(carpetaActiva.estadoCausa || "INGRESADO")}</span>
                   </div>
                 </div>
@@ -812,9 +686,7 @@ export default function Dashboard() {
                           </div>
                         </td>
                         <td className="py-4 px-5 align-middle">
-                          <span className="inline-flex items-center justify-center text-center text-xs font-semibold px-3 py-1.5 rounded-xl border bg-indigo-50/90 text-indigo-700 border-indigo-200/70 leading-tight max-w-full">
-                            {doc.materiaLegal || "Documento"}
-                          </span>
+                          <span className="inline-flex items-center justify-center text-center text-xs font-semibold px-3 py-1.5 rounded-xl border bg-indigo-50/90 text-indigo-700 border-indigo-200/70 leading-tight max-w-full">{doc.materiaLegal || "Documento"}</span>
                         </td>
                         <td className="py-4 px-6 align-middle text-right whitespace-nowrap">
                           <div className="inline-flex items-center justify-end gap-1">
@@ -832,7 +704,7 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* MODAL FEEDBACK PROCESANDO IA INDIVIDUAL */}
+      {/* MODALES REUTILIZABLES */}
       {estadoSubida !== "esperando" && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md flex items-center justify-center p-4 z-[100] animate-fadeIn">
           <div className="bg-white rounded-3xl max-w-sm w-full p-8 shadow-2xl border border-slate-100 text-center flex flex-col items-center">
@@ -843,16 +715,12 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* TOAST NOTIFICACIÓN */}
       {notificacion && (<div className={`fixed bottom-6 right-6 z-[200] flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border animate-fadeIn transition-all duration-300 ${notificacion.tipo === "exito" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-rose-50 border-rose-200 text-rose-800"}`}><div className={`p-1.5 rounded-full ${notificacion.tipo === "exito" ? "bg-emerald-200/60 text-emerald-600" : "bg-rose-200/60 text-rose-600"}`}>{notificacion.tipo === "exito" ? <CheckCircle size={20} /> : <AlertTriangle size={20} />}</div><p className="font-bold text-sm">{notificacion.mensaje}</p></div>)}
 
-      {/* MODAL EDICIÓN DOCUMENTO */}
       {docEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Documento</h3><form onSubmit={guardarEdicion} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre Archivo:</label><input type="text" value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Carpeta Destino:</label><select value={nuevoCasoId} onChange={(e) => setNuevoCasoId(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20">{casos.map((c) => (<option key={c.id} value={c.id}>{c.representado?.nombre || "Sin Nombre"} ({formatEnumText(c.areaJuridica)})</option>))}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Resumen / Análisis IA (Editable):</label><textarea value={nuevoResumen} onChange={(e) => setNuevoResumen(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 min-h-[100px] text-sm outline-none focus:ring-2 focus:ring-blue-500/20" /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas Internas:</label><textarea value={nuevasNotasDoc} onChange={(e) => setNuevasNotasDoc(e.target.value)} placeholder="Añade notas privadas para este documento..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[80px] text-sm outline-none focus:ring-2 focus:ring-amber-500/20" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setDocEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
-      {/* MODAL EDICIÓN CASO */}
-      {casoEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Expediente</h3><form onSubmit={guardarEdicionCaso} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre:</label><input type="text" value={nuevoRutRepresentado} onChange={(e) => setNuevoRutRepresentado(formatearRUT(e.target.value))} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Ej: 12.345.678-9" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">RUT:</label><input type="text" value={nuevoRutRepresentado} onChange={(e) => setNuevoRutRepresentado(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" /></div></div><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Área Jurídica:</label><select value={nuevaAreaJuridica} onChange={(e) => setNuevaAreaJuridica(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none">{categoriasLegales.map(cat => <option key={cat} value={cat}>{formatEnumText(cat)}</option>)}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Estado de Causa:</label><select value={nuevoEstadoCausa} onChange={(e) => setNuevoEstadoCausa(e.target.value)} className="w-full border border-blue-200 rounded-xl p-3 bg-blue-50/50 text-sm font-semibold text-blue-800 outline-none">{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas del Expediente:</label><textarea value={nuevasNotasCaso} onChange={(e) => setNuevasNotasCaso(e.target.value)} placeholder="Ej: Faltan firmas..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[120px] text-sm outline-none" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setCasoEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
+      {casoEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Expediente</h3><form onSubmit={guardarEdicionCaso} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre:</label><input type="text" value={nuevoNombreRepresentado} onChange={(e) => setNuevoNombreRepresentado(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Nombre completo" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">RUT:</label><input type="text" value={nuevoRutRepresentado} onChange={(e) => setNuevoRutRepresentado(formatearRUT(e.target.value))} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Ej: 12.345.678-9" /></div></div><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Área Jurídica:</label><select value={nuevaAreaJuridica} onChange={(e) => setNuevaAreaJuridica(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none">{categoriasLegales.map(cat => <option key={cat} value={cat}>{formatEnumText(cat)}</option>)}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Estado de Causa:</label><select value={nuevoEstadoCausa} onChange={(e) => setNuevoEstadoCausa(e.target.value)} className="w-full border border-blue-200 rounded-xl p-3 bg-blue-50/50 text-sm font-semibold text-blue-800 outline-none">{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas del Expediente:</label><textarea value={nuevasNotasCaso} onChange={(e) => setNuevasNotasCaso(e.target.value)} placeholder="Ej: Faltan firmas..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[120px] text-sm outline-none" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setCasoEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
-      {/* MODALES ELIMINAR */}
       {docAEliminar && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-8">¿Eliminar archivo?</h3><div className="flex gap-3"><button onClick={() => setDocAEliminar(null)} className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl text-sm font-bold">Cancelar</button><button onClick={ejecutarEliminacion} className="flex-1 bg-rose-600 text-white py-3 rounded-xl text-sm font-bold">Eliminar</button></div></div></div>)}
       {casoAEliminar && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">¿Eliminar Carpeta?</h3><p className="text-xs sm:text-sm text-rose-500 mb-8 font-semibold">Se eliminarán todos los documentos.</p><div className="flex gap-3"><button onClick={() => setCasoAEliminar(null)} className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl text-sm font-bold">Cancelar</button><button onClick={ejecutarEliminacionCaso} className="flex-1 bg-rose-600 text-white py-3 rounded-xl text-sm font-bold">Sí, Eliminar</button></div></div></div>)}
     </div>
