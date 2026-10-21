@@ -173,30 +173,53 @@ export default function Dashboard() {
           const resSubida = await fetch(urlDeSubida, { method: "PUT", body: item.file, headers: { "Content-Type": item.file.type } });
           if (!resSubida.ok) throw new Error("Error de red");
 
-          actualizarEstadoLote(item.id, 'analizando');
+          let reintentos = 0;
+          let exitoIA = false;
+          let docRes = null;
 
-          const resBd = await fetch("/api/documentos", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ nombreArchivo: item.file.name, claveArchivo }),
-          });
+          // SISTEMA DE REINTENTOS AUTOMÁTICOS EN CASO DE BLOQUEO 429
+          while (reintentos < 4 && !exitoIA) {
+            try {
+              actualizarEstadoLote(item.id, 'analizando', reintentos > 0 ? `Pausado temporalmente por cuota. Reintentando de forma invisible (${reintentos}/3)...` : undefined);
 
-          if (!resBd.ok) {
-            const errData = await resBd.json();
-            throw new Error(errData.error || "Fallo en motor de extracción");
+              const resBd = await fetch("/api/documentos", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ nombreArchivo: item.file.name, claveArchivo }),
+              });
+
+              if (!resBd.ok) {
+                const errData = await resBd.json();
+                if (resBd.status === 429 || errData.error === "429") {
+                  throw new Error("429"); // Lanzamos la excepción para atraparla y reintentar
+                }
+                throw new Error(errData.error || "Fallo en motor de extracción");
+              }
+
+              const dataBd = await resBd.json();
+              docRes = dataBd.documento;
+              exitoIA = true;
+
+            } catch (errorIA: any) {
+              if (errorIA.message === "429") {
+                reintentos++;
+                if (reintentos >= 4) throw new Error("Límite de cuota agotado. Intenta de nuevo más tarde.");
+
+                // Si falla, espera 10s, luego 20s, luego 30s antes de reintentar
+                await new Promise(resolve => setTimeout(resolve, 10000 * reintentos));
+              } else {
+                throw errorIA; // Si es un error distinto a 429, rompe el bucle y marca como error real
+              }
+            }
           }
 
-          const dataBd = await resBd.json();
-          const docRes = dataBd.documento;
           const casoArea = docRes?.casoId ? casos.find(c => c.id === docRes.casoId)?.areaJuridica : "CIVIL";
-
           actualizarEstadoLote(item.id, 'exito', docRes?.materiaLegal || "Procesado", casoArea);
           procesados++;
           cargarDatos();
 
-          // Pausa estratégica de 6 segundos entre cada documento para no saturar 
-          // el límite gratuito (Free Tier) de Google Gemini API
-          await new Promise(resolve => setTimeout(resolve, 6000));
+          // Retraso normal de 8 segundos entre cada archivo para evitar activar el escudo de Google
+          await new Promise(resolve => setTimeout(resolve, 8000));
 
         } catch (error: any) {
           actualizarEstadoLote(item.id, 'error', error.message || "Fallo");

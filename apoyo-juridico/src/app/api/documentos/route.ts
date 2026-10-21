@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import prisma from "@/app/lib/prisma";
-// Camuflamos la importación con un alias genérico
 import { GoogleGenerativeAI as MotorProcesamiento } from "@google/generative-ai";
 import { GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { r2 } from "@/app/lib/r2";
@@ -15,9 +14,7 @@ export const fetchCache = 'force-no-store';
 
 export const maxDuration = 60;
 
-// Inicializamos el motor bajo un nombre discreto
-const motor = new MotorProcesamiento(process.env.GEMINI_API_KEY || "");
-const ENGINE_VERSION = "gemini-3.8-flash"; // ID interno del servicio de procesamiento
+const ENGINE_VERSION = "gemini-3.8-flash";
 
 function obtenerMimeType(ext: string) {
     if (ext === 'pdf') return 'application/pdf';
@@ -53,6 +50,17 @@ export async function POST(request: Request) {
     try {
         const body = await request.json();
         const { nombreArchivo, claveArchivo } = body;
+
+        // POOL DE LLAVES: Permite usar múltiples llaves para multiplicar la cuota gratuita
+        const llaves = [
+            process.env.GEMINI_API_KEY,
+            process.env.GEMINI_API_KEY_2,
+            process.env.GEMINI_API_KEY_3
+        ].filter(Boolean) as string[];
+
+        // Elegimos una llave al azar en cada petición para distribuir la carga
+        const llaveAleatoria = llaves[Math.floor(Math.random() * llaves.length)] || "";
+        const motor = new MotorProcesamiento(llaveAleatoria);
 
         let buffer: Buffer;
         try {
@@ -167,6 +175,12 @@ export async function POST(request: Request) {
 
             } catch (errorProcesamiento: any) {
                 console.error("Error en el motor de análisis:", errorProcesamiento);
+
+                // INTERCEPTOR DE BLOQUEO 429: Abortar y avisar al frontend para reintento
+                if (errorProcesamiento?.status === 429 || errorProcesamiento?.message?.includes("429") || errorProcesamiento?.message?.includes("Quota")) {
+                    return NextResponse.json({ error: "429" }, { status: 429 });
+                }
+
                 materiaLegal = "Error de Análisis Automático";
                 resumen = (errorProcesamiento?.status === 503)
                     ? "Los servidores de análisis están saturados. Reintenta."
