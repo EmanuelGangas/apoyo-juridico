@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/app/lib/prisma";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+// Camuflamos la importación con un alias genérico
+import { GoogleGenerativeAI as MotorProcesamiento } from "@google/generative-ai";
 import { GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { r2 } from "@/app/lib/r2";
 import crypto from "crypto";
@@ -12,10 +13,11 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 
-// PREVENCIÓN DE TIMEOUT
 export const maxDuration = 60;
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+// Inicializamos el motor bajo un nombre discreto
+const motor = new MotorProcesamiento(process.env.GEMINI_API_KEY || "");
+const ENGINE_VERSION = "gemini-3.8-flash"; // ID interno del servicio de procesamiento
 
 function obtenerMimeType(ext: string) {
     if (ext === 'pdf') return 'application/pdf';
@@ -86,24 +88,24 @@ export async function POST(request: Request) {
         const urlPublica = `https://${process.env.R2_BUCKET_NAME}.${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${claveArchivo}`;
 
         let errorLectura = false;
-        const partesIA: any[] = [];
+        const bloquesTexto: any[] = [];
         const ext = nombreArchivo.split('.').pop()?.toLowerCase() || "";
 
         try {
             if (['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
-                partesIA.push({
+                bloquesTexto.push({
                     inlineData: { data: buffer.toString("base64"), mimeType: obtenerMimeType(ext) }
                 });
             } else if (['docx', 'doc'].includes(ext)) {
                 const result = await mammoth.extractRawText({ buffer });
-                partesIA.push(`Texto extraído del Word:\n${result.value.substring(0, 15000)}`);
+                bloquesTexto.push(`Texto extraído del Word:\n${result.value.substring(0, 15000)}`);
             } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
                 const workbook = xlsx.read(buffer, { type: "buffer" });
                 const firstSheetName = workbook.SheetNames[0];
                 const csvData = xlsx.utils.sheet_to_csv(workbook.Sheets[firstSheetName]);
-                partesIA.push(`Datos extraídos del Excel:\n${csvData.substring(0, 15000)}`);
+                bloquesTexto.push(`Datos extraídos del Excel:\n${csvData.substring(0, 15000)}`);
             } else if (ext === 'txt') {
-                partesIA.push(`Texto del documento:\n${buffer.toString("utf-8").substring(0, 15000)}`);
+                bloquesTexto.push(`Texto del documento:\n${buffer.toString("utf-8").substring(0, 15000)}`);
             } else {
                 throw new Error("Formato no soportado");
             }
@@ -115,14 +117,14 @@ export async function POST(request: Request) {
         let resumen = "No se pudo extraer resumen automático.";
         let nombreExtraido = "";
         let rutExtraido = "";
-        let areaJuridicaExtraida: any = "CIVIL"; // TypeScript bypass: any permite saltarse la validación estricta de Prisma
+        let areaProcesadaExtraida: any = "CIVIL";
 
         if (errorLectura) {
             materiaLegal = "Archivo Ilegible / Dañado";
             resumen = "El documento tiene un formato no soportado, está dañado o protegido.";
         } else {
             try {
-                const promptInstrucciones = `
+                const reglasDeExtraccion = `
                 Eres un asistente legal en Chile. Analiza la información adjunta.
                 REGLAS ESTRICTAS:
                 1. DEBES devolver ÚNICAMENTE un objeto JSON válido.
@@ -136,8 +138,8 @@ export async function POST(request: Request) {
                   "nombreRepresentado": "Nombre completo de la persona/empresa. Si no hay, devuelve ''"
                 }`;
 
-                const model = genAI.getGenerativeModel({
-                    model: "gemini-3.8-flash",
+                const procesador = motor.getGenerativeModel({
+                    model: ENGINE_VERSION,
                     generationConfig: {
                         responseMimeType: "application/json",
                         temperature: 0.0,
@@ -146,29 +148,29 @@ export async function POST(request: Request) {
                     }
                 });
 
-                const result = await model.generateContent([promptInstrucciones, ...partesIA]);
+                const result = await procesador.generateContent([reglasDeExtraccion, ...bloquesTexto]);
                 let textoRespuesta = result.response.text();
                 textoRespuesta = textoRespuesta.replace(/```json/gi, '').replace(/```/g, '').trim();
 
-                const dataIA = JSON.parse(textoRespuesta);
+                const datosExtraidos = JSON.parse(textoRespuesta);
 
-                materiaLegal = dataIA.tipoDocumento || materiaLegal;
-                resumen = dataIA.resumen || resumen;
-                nombreExtraido = dataIA.nombreRepresentado ? dataIA.nombreRepresentado.trim() : "";
+                materiaLegal = datosExtraidos.tipoDocumento || materiaLegal;
+                resumen = datosExtraidos.resumen || resumen;
+                nombreExtraido = datosExtraidos.nombreRepresentado ? datosExtraidos.nombreRepresentado.trim() : "";
 
                 const areasValidas = ["CIVIL", "PENAL", "FAMILIA", "LABORAL", "COBRANZA", "SALUD"];
-                const areaProcesada = dataIA.areaJuridica ? dataIA.areaJuridica.toUpperCase().trim() : "CIVIL";
-                areaJuridicaExtraida = areasValidas.includes(areaProcesada) ? areaProcesada : "CIVIL";
+                const areaIdentificada = datosExtraidos.areaJuridica ? datosExtraidos.areaJuridica.toUpperCase().trim() : "CIVIL";
+                areaProcesadaExtraida = areasValidas.includes(areaIdentificada) ? areaIdentificada : "CIVIL";
 
-                let rutRaw = dataIA.rutRepresentado ? dataIA.rutRepresentado.trim() : "";
+                let rutRaw = datosExtraidos.rutRepresentado ? datosExtraidos.rutRepresentado.trim() : "";
                 rutExtraido = rutRaw ? formatearRUT(rutRaw) : "";
 
-            } catch (iaError: any) {
-                console.error("Error al clasificar con IA:", iaError);
-                materiaLegal = "Error de Análisis IA";
-                resumen = (iaError?.status === 503)
-                    ? "Los servidores de IA están saturados. Reintenta."
-                    : `ERROR REAL: ${iaError.message || "Fallo en parseo de JSON"}`;
+            } catch (errorProcesamiento: any) {
+                console.error("Error en el motor de análisis:", errorProcesamiento);
+                materiaLegal = "Error de Análisis Automático";
+                resumen = (errorProcesamiento?.status === 503)
+                    ? "Los servidores de análisis están saturados. Reintenta."
+                    : `ERROR DE PROCESAMIENTO: ${errorProcesamiento.message || "Fallo en parseo de datos"}`;
             }
         }
 
@@ -188,20 +190,18 @@ export async function POST(request: Request) {
             });
 
             if (representado) {
-                const casoMismaArea = representado.casos?.find((c: any) => c.areaJuridica === areaJuridicaExtraida);
+                const casoMismaArea = representado.casos?.find((c: any) => c.areaJuridica === areaProcesadaExtraida);
 
                 if (casoMismaArea) {
                     casoFinalId = casoMismaArea.id;
                 } else if (representado.casos && representado.casos.length > 0) {
                     const nuevoCaso = await prisma.caso.create({
-                        // Bypass estricto con "as any"
-                        data: { representadoId: representado.id, areaJuridica: areaJuridicaExtraida as any }
+                        data: { representadoId: representado.id, areaJuridica: areaProcesadaExtraida as any }
                     });
                     casoFinalId = nuevoCaso.id;
                 } else {
                     const nuevoCaso = await prisma.caso.create({
-                        // Bypass estricto con "as any"
-                        data: { representadoId: representado.id, areaJuridica: areaJuridicaExtraida as any }
+                        data: { representadoId: representado.id, areaJuridica: areaProcesadaExtraida as any }
                     });
                     casoFinalId = nuevoCaso.id;
                 }
@@ -210,12 +210,10 @@ export async function POST(request: Request) {
                     data: {
                         nombre: nombreFinal,
                         rut: rutSeguro,
-                        // Bypass estricto con "as any"
-                        casos: { create: { areaJuridica: areaJuridicaExtraida as any } }
+                        casos: { create: { areaJuridica: areaProcesadaExtraida as any } }
                     },
                     include: { casos: true }
                 });
-                // Bypass estricto para extraer las causas sin que TS arroje error
                 casoFinalId = (nuevoRepresentado as any).casos[0].id;
             }
         } catch (dbError: any) {

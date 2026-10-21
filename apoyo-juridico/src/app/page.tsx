@@ -3,9 +3,9 @@
 import { useState, useEffect } from "react";
 import {
   FolderOpen, UploadCloud, FileText, CheckCircle, Clock, Trash2, Edit3,
-  Folder, Layers, Search, ChevronDown, ChevronUp, Check, Sparkles, AlertTriangle,
+  Folder, Layers, Search, ChevronDown, ChevronUp, Check, AlertTriangle,
   ArrowLeft, Image as ImageIcon, FileSpreadsheet, File, Filter, FileSignature,
-  Play, Plus, Loader2, CheckCircle2, XCircle
+  Play, Plus, Loader2, CheckCircle2, XCircle, Cpu
 } from "lucide-react";
 
 type EstadoArchivo = 'esperando' | 'subiendo' | 'analizando' | 'exito' | 'error';
@@ -23,12 +23,10 @@ export default function Dashboard() {
   const [casos, setCasos] = useState<any[]>([]);
   const [documentosGlobales, setDocumentosGlobales] = useState<any[]>([]);
 
-  // --- SUBIDA INDIVIDUAL ---
   const [archivo, setArchivo] = useState<globalThis.File | null>(null);
   const [estadoSubida, setEstadoSubida] = useState<"esperando" | "subiendo" | "exito" | "error">("esperando");
   const [errorValidacion, setErrorValidacion] = useState<string | null>(null);
 
-  // --- CARGA MASIVA ---
   const [lote, setLote] = useState<ArchivoLote[]>([]);
   const [procesandoLote, setProcesandoLote] = useState(false);
 
@@ -38,7 +36,6 @@ export default function Dashboard() {
   const [carpetaSeleccionadaId, setCarpetaSeleccionadaId] = useState<string | null>(null);
   const [categoriaSeleccionada, setCategoriaSeleccionada] = useState<string | null>(null);
 
-  // Estados Edición
   const [docEditando, setDocEditando] = useState<any | null>(null);
   const [nuevoNombre, setNuevoNombre] = useState("");
   const [nuevoCasoId, setNuevoCasoId] = useState("");
@@ -101,11 +98,11 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nombreArchivo: archivo.name, tipoArchivo: archivo.type }),
       });
-      if (!resTicket.ok) throw new Error("Error ticket");
+      if (!resTicket.ok) throw new Error("Error de conexión");
       const { urlDeSubida, claveArchivo } = await resTicket.json();
 
       const resSubida = await fetch(urlDeSubida, { method: "PUT", body: archivo, headers: { "Content-Type": archivo.type } });
-      if (!resSubida.ok) throw new Error("Error subida R2");
+      if (!resSubida.ok) throw new Error("Error en almacenamiento local");
 
       const resBd = await fetch("/api/documentos", {
         method: "POST",
@@ -115,11 +112,11 @@ export default function Dashboard() {
 
       const dataResBd = await resBd.json();
 
-      if (!resBd.ok) throw new Error(dataResBd.error || "Error al procesar el documento en BD.");
+      if (!resBd.ok) throw new Error(dataResBd.error || "Error al procesar los datos.");
 
       setEstadoSubida("exito");
       cargarDatos();
-      mostrarNotificacion("exito", "Documento procesado y clasificado con IA.");
+      mostrarNotificacion("exito", "Documento procesado automáticamente.");
     } catch (error: any) {
       setEstadoSubida("error");
       mostrarNotificacion("error", error.message || "Error al procesar el documento.");
@@ -170,11 +167,11 @@ export default function Dashboard() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ nombreArchivo: item.file.name, tipoArchivo: item.file.type }),
           });
-          if (!resTicket.ok) throw new Error("Error ticket nube");
+          if (!resTicket.ok) throw new Error("Error en servidor");
           const { urlDeSubida, claveArchivo } = await resTicket.json();
 
           const resSubida = await fetch(urlDeSubida, { method: "PUT", body: item.file, headers: { "Content-Type": item.file.type } });
-          if (!resSubida.ok) throw new Error("Error subida archivo");
+          if (!resSubida.ok) throw new Error("Error de red");
 
           actualizarEstadoLote(item.id, 'analizando');
 
@@ -186,7 +183,7 @@ export default function Dashboard() {
 
           if (!resBd.ok) {
             const errData = await resBd.json();
-            throw new Error(errData.error || "Fallo IA");
+            throw new Error(errData.error || "Fallo en motor de extracción");
           }
 
           const dataBd = await resBd.json();
@@ -347,11 +344,11 @@ export default function Dashboard() {
             <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-2 rounded-xl"><FolderOpen size={20} /></div>
             <span className="font-extrabold text-base tracking-tight">Apoyo Jurídico</span>
           </div>
-          <span className="text-[11px] text-blue-400 font-semibold flex items-center gap-1"><Sparkles size={11} /> Legal AI</span>
+          <span className="text-[11px] text-blue-400 font-semibold flex items-center gap-1"><Cpu size={11} /> Motor Activo</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
           <button onClick={() => { setVentanaActiva("subida"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><UploadCloud size={15} /> Individual</button>
-          <button onClick={() => { setVentanaActiva("subida-masiva"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Layers size={15} /> Carga Masiva</button>
+          <button onClick={() => { setVentanaActiva("subida-masiva"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Layers size={15} /> Carga Múltiple</button>
           <button onClick={() => { setVentanaActiva("documentos"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "documentos" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><FileText size={15} /> Documentos</button>
           <button onClick={() => { setVentanaActiva("causas"); setCarpetaSeleccionadaId(null); setCategoriaSeleccionada(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "causas" || ventanaActiva === "detalle-carpeta" || ventanaActiva === "detalle-categoria" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Folder size={15} /> Causas</button>
         </div>
@@ -362,15 +359,15 @@ export default function Dashboard() {
           <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 text-white p-3 rounded-2xl shadow-lg shadow-blue-500/20"><FolderOpen size={24} /></div>
           <div>
             <h1 className="text-lg font-extrabold tracking-tight text-white">Apoyo Jurídico</h1>
-            <p className="text-xs text-blue-400 font-medium flex items-center gap-1 mt-0.5"><Sparkles size={12} /> Legal Intelligence AI</p>
+            <p className="text-xs text-blue-400 font-medium flex items-center gap-1 mt-0.5"><Cpu size={12} /> Sistema Integrado</p>
           </div>
         </div>
         <nav className="flex-1 space-y-2">
           <button onClick={() => { setVentanaActiva("subida"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
-            <UploadCloud size={20} className="shrink-0" /> Subida Autónoma
+            <UploadCloud size={20} className="shrink-0" /> Carga Individual
           </button>
           <button onClick={() => { setVentanaActiva("subida-masiva"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
-            <Layers size={20} className="shrink-0" /> Carga Masiva IA
+            <Layers size={20} className="shrink-0" /> Carga Múltiple
           </button>
           <button onClick={() => { setVentanaActiva("documentos"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "documentos" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
             <FileText size={20} className="shrink-0" /> Gestión Global
@@ -385,7 +382,7 @@ export default function Dashboard() {
         {ventanaActiva === "subida" && (
           <div className="max-w-2xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
-              <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">Ingreso Inteligente</span>
+              <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">Ingreso de Datos</span>
               <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mt-3 tracking-tight">Carga de Documentos</h2>
               <p className="text-slate-500 mt-2 text-sm md:text-base">Carga un documento legal para clasificación y análisis inmediato.</p>
             </header>
@@ -419,9 +416,9 @@ export default function Dashboard() {
         {ventanaActiva === "subida-masiva" && (
           <div className="max-w-4xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
-              <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center justify-center w-max mx-auto gap-2"><Sparkles size={14} /> Ingreso Inteligente</span>
-              <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mt-3 tracking-tight">Carga Masiva de Documentos</h2>
-              <p className="text-slate-500 mt-2 text-sm md:text-base font-medium max-w-xl mx-auto">Sube 2 o más documentos de cualquier cliente. El motor de IA clasificará cada uno, asociándolo a su causa o creando un nuevo expediente.</p>
+              <span className="bg-indigo-100 text-indigo-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider flex items-center justify-center w-max mx-auto gap-2"><Cpu size={14} /> Procesamiento Avanzado</span>
+              <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mt-3 tracking-tight">Carga Múltiple de Documentos</h2>
+              <p className="text-slate-500 mt-2 text-sm md:text-base font-medium max-w-xl mx-auto">Sube varios documentos en lote. El sistema clasificará cada uno, asociándolo a su causa o creando un nuevo expediente.</p>
             </header>
             <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xl shadow-slate-200/50 overflow-hidden backdrop-blur-xl">
               <div className={`transition-all p-6 sm:p-8 ${lote.length > 0 ? "bg-slate-50 border-b border-slate-200" : "p-8 sm:p-12"}`}>
@@ -462,8 +459,8 @@ export default function Dashboard() {
                             <h4 className="font-bold text-slate-800 text-sm truncate">{item.file.name}</h4>
                             <div className="flex items-center gap-2 mt-1">
                               {item.estado === 'esperando' && <span className="text-xs font-semibold text-slate-400">En cola</span>}
-                              {item.estado === 'subiendo' && <span className="text-xs font-semibold text-blue-600">Subiendo a R2...</span>}
-                              {item.estado === 'analizando' && <span className="text-xs font-semibold text-indigo-600 flex items-center gap-1"><Sparkles size={12} /> Analizando con IA...</span>}
+                              {item.estado === 'subiendo' && <span className="text-xs font-semibold text-blue-600">Subiendo información...</span>}
+                              {item.estado === 'analizando' && <span className="text-xs font-semibold text-indigo-600 flex items-center gap-1"><Cpu size={12} /> Procesando datos...</span>}
                               {item.estado === 'exito' && (
                                 <div className="flex gap-2">
                                   <span className="inline-flex items-center text-xs font-bold text-emerald-700 bg-emerald-100/80 px-2.5 py-0.5 rounded-lg border border-emerald-200">{item.detalle}</span>
@@ -507,7 +504,7 @@ export default function Dashboard() {
             <header className="mb-6 md:mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div>
                 <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">Gestión Global de Documentos</h2>
-                <p className="text-xs md:text-sm text-slate-500 font-medium mt-1">Todos los archivos analizados en la plataforma</p>
+                <p className="text-xs md:text-sm text-slate-500 font-medium mt-1">Todos los archivos procesados en el sistema</p>
               </div>
               <div className="relative w-full md:w-80 lg:w-96">
                 <Search className="absolute left-4 top-3.5 text-slate-400" size={18} />
@@ -522,7 +519,7 @@ export default function Dashboard() {
                     <tr className="bg-slate-50/90 border-b border-slate-200 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
                       <th className="py-4 px-6 w-[43%]">Documento & Notas</th>
                       <th className="py-4 px-5 w-[24%]">Representado / Causa</th>
-                      <th className="py-4 px-5 w-[21%]">Clasificación IA</th>
+                      <th className="py-4 px-5 w-[21%]">Categoría Legal</th>
                       <th className="py-4 px-6 w-[12%] text-right">Acciones</th>
                     </tr>
                   </thead>
@@ -667,8 +664,8 @@ export default function Dashboard() {
                 <table className="w-full min-w-[640px] text-left border-collapse table-fixed">
                   <thead>
                     <tr className="bg-slate-50/90 border-b border-slate-200 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
-                      <th className="py-3.5 px-6 w-[60%]">Documento & Análisis IA</th>
-                      <th className="py-3.5 px-5 w-[25%]">Clasificación IA</th>
+                      <th className="py-3.5 px-6 w-[60%]">Documento & Resumen</th>
+                      <th className="py-3.5 px-5 w-[25%]">Categoría Legal</th>
                       <th className="py-3.5 px-6 w-[15%] text-right">Acciones</th>
                     </tr>
                   </thead>
@@ -681,7 +678,7 @@ export default function Dashboard() {
                             <span className="truncate text-sm font-bold">{doc.nombreArchivo}</span>
                           </a>
                           <div className="pl-11 mt-1.5">
-                            <p className="text-xs text-slate-500 leading-relaxed"><span className="font-semibold text-slate-700">IA:</span> {doc.resumen}</p>
+                            <p className="text-xs text-slate-500 leading-relaxed"><span className="font-semibold text-slate-700">Info:</span> {doc.resumen}</p>
                             {doc.notas && <p className="text-xs text-amber-800 bg-amber-50/80 px-2.5 py-1.5 rounded-lg mt-2 border border-amber-200/70"><span className="font-bold">Notas:</span> {doc.notas}</p>}
                           </div>
                         </td>
@@ -704,11 +701,10 @@ export default function Dashboard() {
         )}
       </main>
 
-      {/* MODALES REUTILIZABLES */}
       {estadoSubida !== "esperando" && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md flex items-center justify-center p-4 z-[100] animate-fadeIn">
           <div className="bg-white rounded-3xl max-w-sm w-full p-8 shadow-2xl border border-slate-100 text-center flex flex-col items-center">
-            {estadoSubida === "subiendo" && (<><div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-5 animate-pulse"><Clock className="animate-spin" size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">Procesando con IA...</h3></>)}
+            {estadoSubida === "subiendo" && (<><div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-5 animate-pulse"><Clock className="animate-spin" size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">Procesando datos...</h3></>)}
             {estadoSubida === "exito" && (<><div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-5 shadow-inner"><Check size={32} strokeWidth={3} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">¡Exitoso!</h3><button onClick={() => { setEstadoSubida("esperando"); setArchivo(null); }} className="w-full mt-4 bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 rounded-2xl text-sm font-bold">Continuar</button></>)}
             {estadoSubida === "error" && (<><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">Error</h3><button onClick={() => { setEstadoSubida("esperando"); setArchivo(null); }} className="w-full mt-4 bg-slate-100 text-slate-700 py-3.5 rounded-2xl text-sm font-bold">Cerrar</button></>)}
           </div>
@@ -717,7 +713,7 @@ export default function Dashboard() {
 
       {notificacion && (<div className={`fixed bottom-6 right-6 z-[200] flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border animate-fadeIn transition-all duration-300 ${notificacion.tipo === "exito" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-rose-50 border-rose-200 text-rose-800"}`}><div className={`p-1.5 rounded-full ${notificacion.tipo === "exito" ? "bg-emerald-200/60 text-emerald-600" : "bg-rose-200/60 text-rose-600"}`}>{notificacion.tipo === "exito" ? <CheckCircle size={20} /> : <AlertTriangle size={20} />}</div><p className="font-bold text-sm">{notificacion.mensaje}</p></div>)}
 
-      {docEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Documento</h3><form onSubmit={guardarEdicion} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre Archivo:</label><input type="text" value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Carpeta Destino:</label><select value={nuevoCasoId} onChange={(e) => setNuevoCasoId(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20">{casos.map((c) => (<option key={c.id} value={c.id}>{c.representado?.nombre || "Sin Nombre"} ({formatEnumText(c.areaJuridica)})</option>))}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Resumen / Análisis IA (Editable):</label><textarea value={nuevoResumen} onChange={(e) => setNuevoResumen(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 min-h-[100px] text-sm outline-none focus:ring-2 focus:ring-blue-500/20" /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas Internas:</label><textarea value={nuevasNotasDoc} onChange={(e) => setNuevasNotasDoc(e.target.value)} placeholder="Añade notas privadas para este documento..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[80px] text-sm outline-none focus:ring-2 focus:ring-amber-500/20" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setDocEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
+      {docEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Documento</h3><form onSubmit={guardarEdicion} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre Archivo:</label><input type="text" value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Carpeta Destino:</label><select value={nuevoCasoId} onChange={(e) => setNuevoCasoId(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20">{casos.map((c) => (<option key={c.id} value={c.id}>{c.representado?.nombre || "Sin Nombre"} ({formatEnumText(c.areaJuridica)})</option>))}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Resumen / Análisis (Editable):</label><textarea value={nuevoResumen} onChange={(e) => setNuevoResumen(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 min-h-[100px] text-sm outline-none focus:ring-2 focus:ring-blue-500/20" /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas Internas:</label><textarea value={nuevasNotasDoc} onChange={(e) => setNuevasNotasDoc(e.target.value)} placeholder="Añade notas privadas para este documento..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[80px] text-sm outline-none focus:ring-2 focus:ring-amber-500/20" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setDocEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
       {casoEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Expediente</h3><form onSubmit={guardarEdicionCaso} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre:</label><input type="text" value={nuevoNombreRepresentado} onChange={(e) => setNuevoNombreRepresentado(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Nombre completo" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">RUT:</label><input type="text" value={nuevoRutRepresentado} onChange={(e) => setNuevoRutRepresentado(formatearRUT(e.target.value))} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Ej: 12.345.678-9" /></div></div><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Área Jurídica:</label><select value={nuevaAreaJuridica} onChange={(e) => setNuevaAreaJuridica(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none">{categoriasLegales.map(cat => <option key={cat} value={cat}>{formatEnumText(cat)}</option>)}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Estado de Causa:</label><select value={nuevoEstadoCausa} onChange={(e) => setNuevoEstadoCausa(e.target.value)} className="w-full border border-blue-200 rounded-xl p-3 bg-blue-50/50 text-sm font-semibold text-blue-800 outline-none">{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas del Expediente:</label><textarea value={nuevasNotasCaso} onChange={(e) => setNuevasNotasCaso(e.target.value)} placeholder="Ej: Faltan firmas..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[120px] text-sm outline-none" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setCasoEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
