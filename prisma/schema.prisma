@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Representado {
+  id        String   @id @default(uuid())
+  rut       String   @unique
+  nombre    String
+  email     String?
+  casos     Caso[]
+  createdAt DateTime @default(now())
+}
+
+model Caso {
+  id             String       @id @default(uuid())
+  representadoId String
+  representado   Representado @relation(fields: [representadoId], references: [id])
+  areaJuridica   AreaJuridica @default(CIVIL)
+  estadoCausa    EstadoCausa  @default(INGRESADO)
+  documentos     Documento[]
+  
+  // --- NUEVO CAMPO ---
+  notas          String?      @db.Text
+  // -------------------
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+}
+
+model Documento {
+  id              String   @id @default(uuid())
+  casoId          String
+  caso            Caso     @relation(fields: [casoId], references: [id])
+  nombreArchivo   String
+  urlR2           String  
+  materiaLegal    String?  
+  resumen         String?  
+  indiceConfianza Float?  
+  notas           String?  @db.Text
+  hashArchivo     String?  @unique
+
+  createdAt       DateTime @default(now())
+}
+
+enum AreaJuridica {
+  FAMILIA
+  LABORAL
+  SALUD
+  CIVIL
+  PENAL
+  COBRANZA
+}
+
+enum EstadoCausa {
+  INGRESADO
+  EN_REVISION
+  EN_PREPARACION
+  EN_TRAMITACION
+  SUSPENDIDO
+  RESUELTO
+  FINALIZADO
+  ARCHIVADO
+}
