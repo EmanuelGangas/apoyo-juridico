@@ -190,8 +190,8 @@ export default function Dashboard() {
 
               if (!resBd.ok) {
                 const errData = await resBd.json();
-                if (resBd.status === 429 || errData.error === "429") {
-                  throw new Error("429"); // Lanzamos la excepción para atraparla y reintentar
+                if (resBd.status === 429 || resBd.status === 503 || errData.error === "429" || errData.error === "REINTENTAR") {
+                  throw new Error("REINTENTAR"); // Lanzamos la excepción para reintentar
                 }
                 throw new Error(errData.error || "Fallo en motor de extracción");
               }
@@ -201,14 +201,14 @@ export default function Dashboard() {
               exitoIA = true;
 
             } catch (errorIA: any) {
-              if (errorIA.message === "429") {
+              if (errorIA.message === "REINTENTAR" || errorIA.message === "429") {
                 reintentos++;
-                if (reintentos >= 4) throw new Error("Límite de cuota agotado. Intenta de nuevo más tarde.");
+                if (reintentos >= 4) throw new Error("Servidores de Google saturados. Intenta de nuevo más tarde.");
 
                 // Si falla, espera 10s, luego 20s, luego 30s antes de reintentar
                 await new Promise(resolve => setTimeout(resolve, 10000 * reintentos));
               } else {
-                throw errorIA; // Si es un error distinto a 429, rompe el bucle y marca como error real
+                throw errorIA; // Error distinto, rompe el bucle
               }
             }
           }

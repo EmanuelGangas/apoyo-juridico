@@ -176,15 +176,17 @@ export async function POST(request: Request) {
             } catch (errorProcesamiento: any) {
                 console.error("Error en el motor de análisis:", errorProcesamiento);
 
-                // INTERCEPTOR DE BLOQUEO 429: Abortar y avisar al frontend para reintento
-                if (errorProcesamiento?.status === 429 || errorProcesamiento?.message?.includes("429") || errorProcesamiento?.message?.includes("Quota")) {
-                    return NextResponse.json({ error: "429" }, { status: 429 });
+                // INTERCEPTOR DE SATURACIÓN (429 y 503): Abortar y avisar al frontend para reintento
+                const msg = errorProcesamiento?.message || "";
+                if (
+                    errorProcesamiento?.status === 429 || msg.includes("429") || msg.includes("Quota") ||
+                    errorProcesamiento?.status === 503 || msg.includes("503") || msg.includes("high demand")
+                ) {
+                    return NextResponse.json({ error: "REINTENTAR" }, { status: 503 });
                 }
 
                 materiaLegal = "Error de Análisis Automático";
-                resumen = (errorProcesamiento?.status === 503)
-                    ? "Los servidores de análisis están saturados. Reintenta."
-                    : `ERROR DE PROCESAMIENTO: ${errorProcesamiento.message || "Fallo en parseo de datos"}`;
+                resumen = `ERROR DE PROCESAMIENTO: ${msg || "Fallo en parseo de datos"}`;
             }
         }
 
