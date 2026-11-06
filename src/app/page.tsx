@@ -38,6 +38,12 @@ export default function Dashboard() {
   const [carpetaSeleccionadaId, setCarpetaSeleccionadaId] = useState<string | null>(null);
   const [categoriaSeleccionada, setCategoriaSeleccionada] = useState<string | null>(null);
 
+  // Estados para SELECCIÓN MÚLTIPLE y ELIMINACIÓN EN LOTE
+  const [casosSeleccionados, setCasosSeleccionados] = useState<string[]>([]);
+  const [docsSeleccionados, setDocsSeleccionados] = useState<string[]>([]);
+  const [confirmarBatchEliminacionDocs, setConfirmarBatchEliminacionDocs] = useState(false);
+  const [confirmarBatchEliminacionCasos, setConfirmarBatchEliminacionCasos] = useState(false);
+
   const [docEditando, setDocEditando] = useState<any | null>(null);
   const [nuevoNombre, setNuevoNombre] = useState("");
   const [nuevoCasoId, setNuevoCasoId] = useState("");
@@ -88,6 +94,16 @@ export default function Dashboard() {
   }, []);
 
   if (!mounted) return null;
+
+  // Limpiar selecciones al cambiar de ventana
+  const cambiarVentana = (ventana: any) => {
+    setVentanaActiva(ventana);
+    setCarpetaSeleccionadaId(null);
+    setCategoriaSeleccionada(null);
+    setBusqueda("");
+    setCasosSeleccionados([]);
+    setDocsSeleccionados([]);
+  };
 
   const manejarSubidaAutonoma = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,7 +215,7 @@ export default function Dashboard() {
             if (cancelarProcesoRef.current) break;
 
             try {
-              actualizarEstadoLote(item.id, 'analizando', reintentos > 0 ? `Pausado temporalmente por saturación. Reintentando (${reintentos}/3)...` : undefined);
+              actualizarEstadoLote(item.id, 'analizando', reintentos > 0 ? `Pausado temporalmente. Reintentando (${reintentos}/3)...` : undefined);
 
               const resBd = await fetch("/api/documentos", {
                 method: "POST",
@@ -222,7 +238,7 @@ export default function Dashboard() {
             } catch (errorIA: any) {
               if (errorIA.message === "REINTENTAR" || errorIA.message === "429") {
                 reintentos++;
-                if (reintentos >= 4) throw new Error("Servidores de Google saturados. Intenta de nuevo más tarde.");
+                if (reintentos >= 4) throw new Error("Servidores saturados. Intenta de nuevo más tarde.");
 
                 let tiempoEspera = 10000 * reintentos;
                 let tiempoPasado = 0;
@@ -245,7 +261,7 @@ export default function Dashboard() {
           cargarDatos();
 
           let pausaNormal = 0;
-          while (pausaNormal < 8000) {
+          while (pausaNormal < 6000) {
             if (cancelarProcesoRef.current) break;
             await new Promise(resolve => setTimeout(resolve, 1000));
             pausaNormal += 1000;
@@ -279,40 +295,117 @@ export default function Dashboard() {
   const carpetaActiva = casos.find(c => c.id === carpetaSeleccionadaId);
   const toggleExpandir = (docId: string) => setResumenesExpandidos(prev => ({ ...prev, [docId]: !prev[docId] }));
 
+  // FUNCIÓN PARA AUTO-ELIMINAR CARPETAS VACÍAS
+  const verificarYLimpiarCasoVacio = async (casoId: string, docsEliminadosIds: string[]) => {
+    const casoObj = casos.find(c => c.id === casoId);
+    if (!casoObj) return;
+
+    const docsRestantes = casoObj.documentos?.filter((d: any) => !docsEliminadosIds.includes(d.id)) || [];
+
+    if (docsRestantes.length === 0) {
+      try {
+        await fetch(`/api/casos/${casoId}`, { method: "DELETE" });
+        setCasos(prev => prev.filter(c => c.id !== casoId));
+        // Si el usuario está viendo esta carpeta, lo sacamos hacia "Causas"
+        if (carpetaSeleccionadaId === casoId) {
+          cambiarVentana("causas");
+        }
+      } catch (e) {
+        console.error("Error al auto-eliminar carpeta:", e);
+      }
+    }
+  };
+
+  // ELIMINACIÓN INDIVIDUAL DE DOCUMENTO
   const ejecutarEliminacion = async () => {
     if (!docAEliminar) return;
     const id = docAEliminar;
     setDocAEliminar(null);
+
+    const docObj = documentosGlobales.find(d => d.id === id);
+    const casoAfectadoId = docObj?.casoId;
+
     setDocumentosGlobales(prev => prev.filter(doc => doc.id !== id));
     setCasos(prev => prev.map(c => ({ ...c, documentos: c.documentos?.filter((d: any) => d.id !== id) })));
+
     try {
       const res = await fetch(`/api/documentos/${id}`, { method: "DELETE" });
-      if (res.ok) mostrarNotificacion("exito", "Documento eliminado.");
-      else throw new Error();
+      if (res.ok) {
+        mostrarNotificacion("exito", "Documento eliminado.");
+        if (casoAfectadoId) await verificarYLimpiarCasoVacio(casoAfectadoId, [id]);
+      } else throw new Error();
     } catch {
       mostrarNotificacion("error", "Error. Revertiendo.");
       cargarDatos();
     }
   };
 
+  // ELIMINACIÓN BATCH (MÚLTIPLES) DOCUMENTOS
+  const ejecutarEliminacionBatchDocs = async () => {
+    setConfirmarBatchEliminacionDocs(false);
+    const ids = [...docsSeleccionados];
+    setDocsSeleccionados([]);
+
+    const docsInfo = documentosGlobales.filter(d => ids.includes(d.id));
+    const casosAfectados = new Set(docsInfo.map(d => d.casoId).filter(Boolean));
+
+    setDocumentosGlobales(prev => prev.filter(doc => !ids.includes(doc.id)));
+    setCasos(prev => prev.map(c => ({ ...c, documentos: c.documentos?.filter((d: any) => !ids.includes(d.id)) })));
+
+    await Promise.allSettled(ids.map(id => fetch(`/api/documentos/${id}`, { method: "DELETE" })));
+
+    for (const casoId of Array.from(casosAfectados)) {
+      await verificarYLimpiarCasoVacio(casoId as string, ids);
+    }
+
+    mostrarNotificacion("exito", `${ids.length} documentos eliminados.`);
+    cargarDatos();
+  };
+
+  // ELIMINACIÓN BATCH (MÚLTIPLES) CARPETAS
+  const ejecutarEliminacionBatchCasos = async () => {
+    setConfirmarBatchEliminacionCasos(false);
+    const ids = [...casosSeleccionados];
+    setCasosSeleccionados([]);
+
+    if (carpetaSeleccionadaId && ids.includes(carpetaSeleccionadaId)) {
+      cambiarVentana("causas");
+    }
+
+    setCasos(prev => prev.filter(c => !ids.includes(c.id)));
+
+    await Promise.allSettled(ids.map(id => fetch(`/api/casos/${id}`, { method: "DELETE" })));
+
+    mostrarNotificacion("exito", `${ids.length} expedientes eliminados.`);
+    cargarDatos();
+  };
+
   const guardarEdicion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!docEditando) return;
     const id = docEditando.id;
+    const oldCasoId = docEditando.casoId;
     setDocEditando(null);
+
     setDocumentosGlobales(prev => prev.map(doc => doc.id === id ? { ...doc, nombreArchivo: nuevoNombre, resumen: nuevoResumen, notas: nuevasNotasDoc } : doc));
+
     try {
       const res = await fetch(`/api/documentos/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ nombreArchivo: nuevoNombre, casoId: nuevoCasoId, resumen: nuevoResumen, notas: nuevasNotasDoc })
       });
-      if (res.ok) mostrarNotificacion("exito", "Actualizado.");
-      else throw new Error();
+      if (res.ok) {
+        mostrarNotificacion("exito", "Actualizado.");
+        // Si el documento se movió de carpeta, verificamos si la carpeta original quedó vacía
+        if (oldCasoId && nuevoCasoId !== oldCasoId) {
+          await verificarYLimpiarCasoVacio(oldCasoId, [id]);
+        }
+      } else throw new Error();
     } catch {
       mostrarNotificacion("error", "Error al guardar.");
-      cargarDatos();
     }
+    cargarDatos();
   };
 
   const guardarEdicionCaso = async (e: React.FormEvent) => {
@@ -344,10 +437,11 @@ export default function Dashboard() {
     }
   };
 
+  // ELIMINACIÓN INDIVIDUAL DE CARPETA
   const ejecutarEliminacionCaso = async () => {
     if (!casoAEliminar) return;
     const id = casoAEliminar;
-    if (carpetaSeleccionadaId === id) { setVentanaActiva("causas"); setCarpetaSeleccionadaId(null); }
+    if (carpetaSeleccionadaId === id) { cambiarVentana("causas"); }
     setCasoAEliminar(null);
     setCasos(prev => prev.filter(c => c.id !== id));
     try {
@@ -359,6 +453,10 @@ export default function Dashboard() {
       cargarDatos();
     }
   };
+
+  // Helpers Checkboxes
+  const toggleCasoSeleccion = (id: string) => setCasosSeleccionados(prev => prev.includes(id) ? prev.filter(c => c !== id) : [...prev, id]);
+  const toggleDocSeleccion = (id: string) => setDocsSeleccionados(prev => prev.includes(id) ? prev.filter(d => d !== id) : [...prev, id]);
 
   const categoriasLegales = ["CIVIL", "PENAL", "FAMILIA", "LABORAL", "COBRANZA", "SALUD"];
   const estadosLegales = ["INGRESADO", "EN_PREPARACION", "EN_REVISION", "EN_TRAMITACION", "SUSPENDIDO", "RESUELTO", "FINALIZADO", "ARCHIVADO"];
@@ -404,10 +502,10 @@ export default function Dashboard() {
           <span className="text-[11px] text-blue-400 font-semibold flex items-center gap-1"><Cpu size={11} /> Motor Activo</span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-          <button onClick={() => { setVentanaActiva("subida"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><UploadCloud size={15} /> Individual</button>
-          <button onClick={() => { setVentanaActiva("subida-masiva"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Layers size={15} /> Carga Múltiple</button>
-          <button onClick={() => { setVentanaActiva("documentos"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "documentos" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><FileText size={15} /> Documentos</button>
-          <button onClick={() => { setVentanaActiva("causas"); setCarpetaSeleccionadaId(null); setCategoriaSeleccionada(null); setBusqueda(""); }} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "causas" || ventanaActiva === "detalle-carpeta" || ventanaActiva === "detalle-categoria" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Folder size={15} /> Causas</button>
+          <button onClick={() => cambiarVentana("subida")} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><UploadCloud size={15} /> Individual</button>
+          <button onClick={() => cambiarVentana("subida-masiva")} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Layers size={15} /> Carga Múltiple</button>
+          <button onClick={() => cambiarVentana("documentos")} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "documentos" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><FileText size={15} /> Documentos</button>
+          <button onClick={() => cambiarVentana("causas")} className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-semibold transition-all ${ventanaActiva === "causas" || ventanaActiva === "detalle-carpeta" || ventanaActiva === "detalle-categoria" ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300"}`}><Folder size={15} /> Causas</button>
         </div>
       </div>
 
@@ -420,22 +518,24 @@ export default function Dashboard() {
           </div>
         </div>
         <nav className="flex-1 space-y-2">
-          <button onClick={() => { setVentanaActiva("subida"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
+          <button onClick={() => cambiarVentana("subida")} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
             <UploadCloud size={20} className="shrink-0" /> Carga Individual
           </button>
-          <button onClick={() => { setVentanaActiva("subida-masiva"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
+          <button onClick={() => cambiarVentana("subida-masiva")} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "subida-masiva" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
             <Layers size={20} className="shrink-0" /> Carga Múltiple
           </button>
-          <button onClick={() => { setVentanaActiva("documentos"); setCarpetaSeleccionadaId(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "documentos" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
+          <button onClick={() => cambiarVentana("documentos")} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "documentos" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
             <FileText size={20} className="shrink-0" /> Gestión Global
           </button>
-          <button onClick={() => { setVentanaActiva("causas"); setCarpetaSeleccionadaId(null); setCategoriaSeleccionada(null); setBusqueda(""); }} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "causas" || ventanaActiva === "detalle-carpeta" || ventanaActiva === "detalle-categoria" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
+          <button onClick={() => cambiarVentana("causas")} className={`flex items-center justify-start text-left whitespace-nowrap gap-3.5 w-full p-3.5 rounded-2xl font-semibold text-sm transition-all duration-200 ${ventanaActiva === "causas" || ventanaActiva === "detalle-carpeta" || ventanaActiva === "detalle-categoria" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30 translate-x-1" : "hover:bg-slate-800/60 hover:text-white text-slate-400"}`}>
             <Folder size={20} className="shrink-0" /> Causas y Representados
           </button>
         </nav>
       </aside>
 
       <main className="flex-1 p-4 sm:p-6 md:p-10 overflow-y-auto relative z-0 min-w-0">
+
+        {/* --- CARGA INDIVIDUAL --- */}
         {ventanaActiva === "subida" && (
           <div className="max-w-2xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
@@ -470,6 +570,7 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* --- CARGA MÚLTIPLE --- */}
         {ventanaActiva === "subida-masiva" && (
           <div className="max-w-4xl mx-auto py-4 md:py-6 animate-fadeIn">
             <header className="mb-8 text-center">
@@ -558,9 +659,10 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* --- GESTIÓN GLOBAL DE DOCUMENTOS --- */}
         {ventanaActiva === "documentos" && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
-            <header className="mb-6 md:mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <header className="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div>
                 <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">Gestión Global de Documentos</h2>
                 <p className="text-xs md:text-sm text-slate-500 font-medium mt-1">Todos los archivos procesados en el sistema</p>
@@ -571,21 +673,40 @@ export default function Dashboard() {
               </div>
             </header>
 
+            {docsSeleccionados.length > 0 && (
+              <div className="mb-6 bg-blue-50 border border-blue-200 p-4 rounded-2xl flex justify-between items-center animate-fadeIn shadow-sm">
+                <span className="font-bold text-blue-800">{docsSeleccionados.length} documentos seleccionados</span>
+                <button onClick={() => setConfirmarBatchEliminacionDocs(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex gap-2 transition-colors"><Trash2 size={16} /> Eliminar Seleccionados</button>
+              </div>
+            )}
+
             <div className="bg-white rounded-3xl border border-slate-200/85 shadow-xl shadow-slate-200/50 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[780px] text-left border-collapse table-fixed">
                   <thead>
                     <tr className="bg-slate-50/90 border-b border-slate-200 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
-                      <th className="py-4 px-6 w-[43%]">Documento & Notas</th>
+                      <th className="py-4 px-4 w-12 text-center">
+                        <input type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500"
+                          checked={documentosFiltradosVentana2.length > 0 && docsSeleccionados.length === documentosFiltradosVentana2.length}
+                          onChange={() => {
+                            if (docsSeleccionados.length === documentosFiltradosVentana2.length) setDocsSeleccionados([]);
+                            else setDocsSeleccionados(documentosFiltradosVentana2.map(d => d.id));
+                          }}
+                        />
+                      </th>
+                      <th className="py-4 px-2 w-[40%]">Documento & Notas</th>
                       <th className="py-4 px-5 w-[24%]">Representado / Causa</th>
-                      <th className="py-4 px-5 w-[21%]">Categoría Legal</th>
+                      <th className="py-4 px-5 w-[20%]">Categoría Legal</th>
                       <th className="py-4 px-6 w-[12%] text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {documentosFiltradosVentana2.map((doc) => (
-                      <tr key={doc.id} className="hover:bg-slate-50/70 transition-colors group">
-                        <td className="py-4 px-6 align-top">
+                      <tr key={doc.id} className={`hover:bg-slate-50/70 transition-colors group ${docsSeleccionados.includes(doc.id) ? "bg-blue-50/30" : ""}`}>
+                        <td className="py-4 px-4 text-center align-top pt-6">
+                          <input type="checkbox" checked={docsSeleccionados.includes(doc.id)} onChange={() => toggleDocSeleccion(doc.id)} className="w-4 h-4 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500" />
+                        </td>
+                        <td className="py-4 px-2 align-top">
                           <a href={`/api/documentos/${doc.id}/ver`} target="_blank" rel="noopener noreferrer" className="font-bold text-slate-900 hover:text-blue-600 flex items-center gap-3 transition-colors">
                             <div className="p-2 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors shrink-0">{getFileIcon(doc.nombreArchivo, 18)}</div>
                             <span className="truncate text-sm font-bold">{doc.nombreArchivo}</span>
@@ -619,15 +740,23 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* --- CAUSAS GENERAL --- */}
         {ventanaActiva === "causas" && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
-            <header className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <header className="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div><h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight">Causas y Carpetas</h2></div>
               <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
                 <div className="relative flex-1 sm:w-60"><Filter className="absolute left-4 top-3.5 text-slate-400" size={16} /><select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)} className="w-full bg-white border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm text-slate-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500/20 font-semibold appearance-none"><option value="TODOS">Todos los Estados</option>{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div>
                 <div className="relative flex-1 sm:w-72"><Search className="absolute left-4 top-3.5 text-slate-400" size={18} /><input type="text" placeholder="Buscar expediente o RUT..." value={busqueda} onChange={(e) => setBusqueda(e.target.value)} className="w-full bg-white border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm text-slate-700 shadow-sm outline-none focus:ring-2 focus:ring-blue-500/20" /></div>
               </div>
             </header>
+
+            {casosSeleccionados.length > 0 && (
+              <div className="mb-6 bg-blue-50 border border-blue-200 p-4 rounded-2xl flex justify-between items-center animate-fadeIn shadow-sm">
+                <span className="font-bold text-blue-800">{casosSeleccionados.length} expedientes seleccionados</span>
+                <button onClick={() => setConfirmarBatchEliminacionCasos(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex gap-2 transition-colors"><Trash2 size={16} /> Eliminar Seleccionados</button>
+              </div>
+            )}
 
             <div className="space-y-8">
               {categoriasLegales.map((categoria) => {
@@ -649,9 +778,14 @@ export default function Dashboard() {
                     ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
                         {casosAMostrar.map((caso) => (
-                          <div key={caso.id} onClick={() => { setCarpetaSeleccionadaId(caso.id); setVentanaActiva("detalle-carpeta"); setBusqueda(""); }} className="bg-slate-50/80 rounded-2xl border border-slate-200/80 p-5 hover:border-blue-300 hover:shadow-lg transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden">
+                          <div key={caso.id} onClick={() => { setCarpetaSeleccionadaId(caso.id); setVentanaActiva("detalle-carpeta"); setBusqueda(""); }} className={`rounded-2xl border p-5 transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden ${casosSeleccionados.includes(caso.id) ? "bg-blue-50/50 border-blue-400 shadow-md ring-1 ring-blue-400" : "bg-slate-50/80 border-slate-200/80 hover:border-blue-300 hover:shadow-lg"}`}>
+                            {/* Checkbox Card */}
+                            <div className="absolute top-4 right-4 z-20" onClick={(e) => e.stopPropagation()}>
+                              <input type="checkbox" checked={casosSeleccionados.includes(caso.id)} onChange={() => toggleCasoSeleccion(caso.id)} className="w-5 h-5 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500 shadow-sm" />
+                            </div>
+
                             <div className="flex items-start justify-between mb-4">
-                              <div className="flex gap-3 min-w-0">
+                              <div className="flex gap-3 min-w-0 pr-8">
                                 <div className="text-blue-500 group-hover:scale-110 transition-transform shrink-0 mt-0.5"><Folder size={26} fill="currentColor" fillOpacity={0.2} /></div>
                                 <div className="min-w-0">
                                   <h4 className="font-bold text-slate-900 text-sm sm:text-base truncate">{caso.representado?.nombre || "Sin Nombre"}</h4>
@@ -659,7 +793,7 @@ export default function Dashboard() {
                                 </div>
                               </div>
                             </div>
-                            {caso.notas && (<div className="mb-4 text-xs text-slate-600 bg-slate-100/70 p-2.5 rounded-xl border border-slate-200/60 line-clamp-2"><span className="font-bold mr-1">Nota:</span>{caso.notas}</div>)}
+                            {caso.notas && (<div className="mb-4 text-xs text-slate-600 bg-white/60 p-2.5 rounded-xl border border-slate-200/60 line-clamp-2"><span className="font-bold mr-1">Nota:</span>{caso.notas}</div>)}
                             <div className="mt-auto pt-3.5 border-t border-slate-200/80 flex items-center justify-between gap-2 text-xs font-bold text-slate-600">
                               <span className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-[11px] font-bold ${getStatusColor(caso.estadoCausa || "INGRESADO")}`}>{formatEnumText(caso.estadoCausa || "INGRESADO")}</span>
                               <span className="bg-white border border-slate-200 px-3 py-1 rounded-full shadow-sm whitespace-nowrap text-xs">{caso.documentos?.length || 0} docs</span>
@@ -675,17 +809,29 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* --- DETALLE DE CATEGORÍA --- */}
         {ventanaActiva === "detalle-categoria" && categoriaSeleccionada && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
-            <button onClick={() => setVentanaActiva("causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> Volver a Causas</button>
-            <header className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-3xl border border-slate-200/85 shadow-xl shadow-slate-200/40">
+            <button onClick={() => cambiarVentana("causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> Volver a Causas</button>
+            <header className="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-3xl border border-slate-200/85 shadow-xl shadow-slate-200/40">
               <div className="flex items-center gap-4"><div className="bg-blue-600 text-white p-3.5 rounded-2xl shadow-md"><FolderOpen size={28} /></div><div><h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight uppercase">ÁREA {categoriaSeleccionada}</h2><p className="text-slate-500 text-xs sm:text-sm font-medium">Todas las carpetas registradas en esta materia</p></div></div>
               <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto"><div className="relative flex-1 sm:w-56"><Filter className="absolute left-4 top-3.5 text-slate-400" size={16} /><select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm text-slate-700 font-semibold outline-none appearance-none"><option value="TODOS">Todos los Estados</option>{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div><div className="relative flex-1 sm:w-72"><Search className="absolute left-4 top-3.5 text-slate-400" size={18} /><input type="text" placeholder="Buscar expediente..." value={busqueda} onChange={(e) => setBusqueda(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-2xl pl-11 pr-4 py-3 text-sm text-slate-700 outline-none" /></div></div>
             </header>
+
+            {casosSeleccionados.length > 0 && (
+              <div className="mb-6 bg-blue-50 border border-blue-200 p-4 rounded-2xl flex justify-between items-center animate-fadeIn shadow-sm">
+                <span className="font-bold text-blue-800">{casosSeleccionados.length} expedientes seleccionados</span>
+                <button onClick={() => setConfirmarBatchEliminacionCasos(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex gap-2 transition-colors"><Trash2 size={16} /> Eliminar Seleccionados</button>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
               {casosFiltradosTotal.filter(c => (c.areaJuridica || "").toUpperCase() === categoriaSeleccionada.toUpperCase()).map((caso) => (
-                <div key={caso.id} onClick={() => { setCarpetaSeleccionadaId(caso.id); setVentanaActiva("detalle-carpeta"); setBusqueda(""); }} className="bg-white rounded-2xl border border-slate-200/80 p-5 hover:border-blue-400 hover:shadow-xl shadow-slate-200 transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden">
-                  <div className="flex items-start justify-between mb-4"><div className="flex gap-3 min-w-0"><div className="text-blue-500 group-hover:scale-110 transition-transform shrink-0 mt-0.5"><Folder size={26} fill="currentColor" fillOpacity={0.2} /></div><div className="min-w-0"><h4 className="font-bold text-slate-900 text-sm sm:text-base truncate">{caso.representado?.nombre || "Sin Nombre"}</h4><p className="text-xs text-slate-500 font-medium mt-0.5">RUT: {caso.representado?.rut || "N/A"}</p></div></div></div>
+                <div key={caso.id} onClick={() => { setCarpetaSeleccionadaId(caso.id); setVentanaActiva("detalle-carpeta"); setBusqueda(""); }} className={`rounded-2xl border p-5 transition-all cursor-pointer flex flex-col justify-between group relative overflow-hidden ${casosSeleccionados.includes(caso.id) ? "bg-blue-50/50 border-blue-400 shadow-md ring-1 ring-blue-400" : "bg-white border-slate-200/80 hover:border-blue-400 hover:shadow-xl shadow-slate-200"}`}>
+                  <div className="absolute top-4 right-4 z-20" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={casosSeleccionados.includes(caso.id)} onChange={() => toggleCasoSeleccion(caso.id)} className="w-5 h-5 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500 shadow-sm" />
+                  </div>
+                  <div className="flex items-start justify-between mb-4"><div className="flex gap-3 min-w-0 pr-8"><div className="text-blue-500 group-hover:scale-110 transition-transform shrink-0 mt-0.5"><Folder size={26} fill="currentColor" fillOpacity={0.2} /></div><div className="min-w-0"><h4 className="font-bold text-slate-900 text-sm sm:text-base truncate">{caso.representado?.nombre || "Sin Nombre"}</h4><p className="text-xs text-slate-500 font-medium mt-0.5">RUT: {caso.representado?.rut || "N/A"}</p></div></div></div>
                   {caso.notas && (<div className="mb-4 text-xs text-slate-600 bg-slate-50 p-2.5 rounded-xl border border-slate-200/60 line-clamp-2"><span className="font-bold mr-1">Nota:</span>{caso.notas}</div>)}
                   <div className="mt-auto pt-3.5 border-t border-slate-100 flex items-center justify-between gap-2 text-xs font-bold text-slate-600"><span className={`inline-flex items-center px-2.5 py-1 rounded-lg border text-[11px] font-bold ${getStatusColor(caso.estadoCausa || "INGRESADO")}`}>{formatEnumText(caso.estadoCausa || "INGRESADO")}</span><span className="bg-slate-50 border border-slate-200 px-3 py-1 rounded-full shadow-sm whitespace-nowrap">{caso.documentos?.length || 0} docs</span></div>
                 </div>
@@ -694,9 +840,11 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* --- DETALLE DE CARPETA (INTERIOR) --- */}
         {ventanaActiva === "detalle-carpeta" && carpetaActiva && (
           <div className="max-w-7xl mx-auto py-2 animate-fadeIn">
-            <button onClick={() => setVentanaActiva(categoriaSeleccionada ? "detalle-categoria" : "causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> {categoriaSeleccionada ? `Volver a ${categoriaSeleccionada}` : "Volver a Causas"}</button>
+            {/* BOTÓN VOLVER: Siempre devuelve a Causas */}
+            <button onClick={() => cambiarVentana("causas")} className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-600 hover:text-blue-600 mb-6 bg-white px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition-colors"><ArrowLeft size={16} /> Volver a Causas</button>
             <header className="mb-6 bg-white rounded-3xl border border-slate-200/85 p-6 sm:p-8 shadow-xl shadow-slate-200/40 flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
               <div className="flex items-center gap-4 sm:gap-5 min-w-0">
                 <div className="bg-blue-50 text-blue-600 p-3.5 sm:p-4 rounded-2xl border border-blue-100 shrink-0"><FolderOpen size={32} /></div>
@@ -717,21 +865,40 @@ export default function Dashboard() {
 
             {carpetaActiva.notas && (<div className="mb-6 bg-amber-50/90 border border-amber-200 rounded-2xl p-5 shadow-sm text-amber-900"><h4 className="text-sm font-bold flex items-center gap-2 mb-1.5 text-amber-800"><FileSignature size={17} /> Notas del Expediente</h4><p className="text-xs sm:text-sm whitespace-pre-wrap leading-relaxed">{carpetaActiva.notas}</p></div>)}
 
+            {docsSeleccionados.length > 0 && (
+              <div className="mb-6 bg-blue-50 border border-blue-200 p-4 rounded-2xl flex justify-between items-center animate-fadeIn shadow-sm">
+                <span className="font-bold text-blue-800">{docsSeleccionados.length} documentos seleccionados</span>
+                <button onClick={() => setConfirmarBatchEliminacionDocs(true)} className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex gap-2 transition-colors"><Trash2 size={16} /> Eliminar Seleccionados</button>
+              </div>
+            )}
+
             <div className="bg-white rounded-3xl border border-slate-200/85 shadow-xl shadow-slate-200/50 overflow-hidden">
               <div className="p-5 sm:p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center"><h3 className="text-base sm:text-lg font-bold text-slate-800 flex items-center gap-2"><FileText size={19} className="text-slate-400" /> Archivos del Expediente <span className="bg-blue-100 text-blue-700 text-xs px-2.5 py-0.5 rounded-full ml-1 font-bold">{carpetaActiva.documentos?.length || 0}</span></h3></div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[640px] text-left border-collapse table-fixed">
                   <thead>
                     <tr className="bg-slate-50/90 border-b border-slate-200 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
-                      <th className="py-3.5 px-6 w-[60%]">Documento & Resumen</th>
-                      <th className="py-3.5 px-5 w-[25%]">Categoría Legal</th>
+                      <th className="py-3.5 px-4 w-12 text-center">
+                        <input type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500"
+                          checked={carpetaActiva.documentos?.length > 0 && docsSeleccionados.length === carpetaActiva.documentos.length}
+                          onChange={() => {
+                            if (docsSeleccionados.length === carpetaActiva.documentos?.length) setDocsSeleccionados([]);
+                            else setDocsSeleccionados(carpetaActiva.documentos?.map((d: any) => d.id) || []);
+                          }}
+                        />
+                      </th>
+                      <th className="py-3.5 px-3 w-[57%]">Documento & Resumen</th>
+                      <th className="py-3.5 px-5 w-[22%]">Categoría Legal</th>
                       <th className="py-3.5 px-6 w-[15%] text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {carpetaActiva.documentos?.map((doc: any) => (
-                      <tr key={doc.id} className="hover:bg-slate-50/60 transition-colors group">
-                        <td className="py-4 px-6 align-top">
+                      <tr key={doc.id} className={`hover:bg-slate-50/60 transition-colors group ${docsSeleccionados.includes(doc.id) ? "bg-blue-50/30" : ""}`}>
+                        <td className="py-4 px-4 text-center align-top pt-5">
+                          <input type="checkbox" checked={docsSeleccionados.includes(doc.id)} onChange={() => toggleDocSeleccion(doc.id)} className="w-4 h-4 rounded border-slate-300 text-blue-600 cursor-pointer focus:ring-blue-500" />
+                        </td>
+                        <td className="py-4 px-3 align-top">
                           <a href={`/api/documentos/${doc.id}/ver`} target="_blank" rel="noopener noreferrer" className="font-bold text-slate-900 hover:text-blue-600 flex items-center gap-3">
                             <div className="p-2 bg-blue-50 text-blue-600 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors shrink-0">{getFileIcon(doc.nombreArchivo, 18)}</div>
                             <span className="truncate text-sm font-bold">{doc.nombreArchivo}</span>
@@ -760,6 +927,7 @@ export default function Dashboard() {
         )}
       </main>
 
+      {/* --- MODALES Y NOTIFICACIONES --- */}
       {estadoSubida !== "esperando" && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-md flex items-center justify-center p-4 z-[100] animate-fadeIn">
           <div className="bg-white rounded-3xl max-w-sm w-full p-8 shadow-2xl border border-slate-100 text-center flex flex-col items-center">
@@ -772,12 +940,19 @@ export default function Dashboard() {
 
       {notificacion && (<div className={`fixed bottom-6 right-6 z-[200] flex items-center gap-3 px-5 py-4 rounded-2xl shadow-2xl border animate-fadeIn transition-all duration-300 ${notificacion.tipo === "exito" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-rose-50 border-rose-200 text-rose-800"}`}><div className={`p-1.5 rounded-full ${notificacion.tipo === "exito" ? "bg-emerald-200/60 text-emerald-600" : "bg-rose-200/60 text-rose-600"}`}>{notificacion.tipo === "exito" ? <CheckCircle size={20} /> : <AlertTriangle size={20} />}</div><p className="font-bold text-sm">{notificacion.mensaje}</p></div>)}
 
+      {/* --- MODALES DE EDICIÓN --- */}
       {docEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Documento</h3><form onSubmit={guardarEdicion} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre Archivo:</label><input type="text" value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Carpeta Destino:</label><select value={nuevoCasoId} onChange={(e) => setNuevoCasoId(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none focus:ring-2 focus:ring-blue-500/20">{casos.map((c) => (<option key={c.id} value={c.id}>{c.representado?.nombre || "Sin Nombre"} ({formatEnumText(c.areaJuridica)})</option>))}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Resumen / Análisis (Editable):</label><textarea value={nuevoResumen} onChange={(e) => setNuevoResumen(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 min-h-[100px] text-sm outline-none focus:ring-2 focus:ring-blue-500/20" /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas Internas:</label><textarea value={nuevasNotasDoc} onChange={(e) => setNuevasNotasDoc(e.target.value)} placeholder="Añade notas privadas para este documento..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[80px] text-sm outline-none focus:ring-2 focus:ring-amber-500/20" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setDocEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
       {casoEditando && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border border-slate-100"><h3 className="text-xl font-extrabold text-slate-900 mb-4">Editar Expediente</h3><form onSubmit={guardarEdicionCaso} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 text-sm"><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Nombre:</label><input type="text" value={nuevoNombreRepresentado} onChange={(e) => setNuevoNombreRepresentado(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Nombre completo" required /></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">RUT:</label><input type="text" value={nuevoRutRepresentado} onChange={(e) => setNuevoRutRepresentado(formatearRUT(e.target.value))} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none" placeholder="Ej: 12.345.678-9" /></div></div><div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Área Jurídica:</label><select value={nuevaAreaJuridica} onChange={(e) => setNuevaAreaJuridica(e.target.value)} className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50/50 text-sm outline-none">{categoriasLegales.map(cat => <option key={cat} value={cat}>{formatEnumText(cat)}</option>)}</select></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Estado de Causa:</label><select value={nuevoEstadoCausa} onChange={(e) => setNuevoEstadoCausa(e.target.value)} className="w-full border border-blue-200 rounded-xl p-3 bg-blue-50/50 text-sm font-semibold text-blue-800 outline-none">{estadosLegales.map(est => <option key={est} value={est}>{formatEnumText(est)}</option>)}</select></div></div><div><label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notas del Expediente:</label><textarea value={nuevasNotasCaso} onChange={(e) => setNuevasNotasCaso(e.target.value)} placeholder="Ej: Faltan firmas..." className="w-full border border-amber-200 rounded-xl p-3 bg-amber-50/30 min-h-[120px] text-sm outline-none" /></div><div className="flex gap-3 pt-4"><button type="button" onClick={() => setCasoEditando(null)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button type="submit" className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Guardar</button></div></form></div></div>)}
 
+      {/* --- MODALES DE ELIMINACIÓN INDIVIDUAL --- */}
       {docAEliminar && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-8">¿Eliminar archivo?</h3><div className="flex gap-3"><button onClick={() => setDocAEliminar(null)} className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl text-sm font-bold">Cancelar</button><button onClick={ejecutarEliminacion} className="flex-1 bg-rose-600 text-white py-3 rounded-xl text-sm font-bold">Eliminar</button></div></div></div>)}
       {casoAEliminar && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">¿Eliminar Carpeta?</h3><p className="text-xs sm:text-sm text-rose-500 mb-8 font-semibold">Se eliminarán todos los documentos.</p><div className="flex gap-3"><button onClick={() => setCasoAEliminar(null)} className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-xl text-sm font-bold">Cancelar</button><button onClick={ejecutarEliminacionCaso} className="flex-1 bg-rose-600 text-white py-3 rounded-xl text-sm font-bold">Sí, Eliminar</button></div></div></div>)}
+
+      {/* --- MODALES DE ELIMINACIÓN MÚLTIPLE (BATCH) --- */}
+      {confirmarBatchEliminacionDocs && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">¿Eliminar {docsSeleccionados.length} documentos?</h3><p className="text-xs sm:text-sm text-rose-500 mb-8 font-semibold">Las carpetas que queden vacías también se eliminarán.</p><div className="flex gap-3"><button onClick={() => setConfirmarBatchEliminacionDocs(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button onClick={ejecutarEliminacionBatchDocs} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Eliminar Todos</button></div></div></div>)}
+      {confirmarBatchEliminacionCasos && (<div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn"><div className="bg-white rounded-3xl max-w-sm w-full p-8 text-center shadow-2xl border border-slate-100"><div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner"><AlertTriangle size={32} /></div><h3 className="text-xl font-extrabold text-slate-900 mb-2">¿Eliminar {casosSeleccionados.length} expedientes?</h3><p className="text-xs sm:text-sm text-rose-500 mb-8 font-semibold">Se borrarán de forma irreversible todos los documentos en su interior.</p><div className="flex gap-3"><button onClick={() => setConfirmarBatchEliminacionCasos(false)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 py-3 rounded-xl text-sm font-bold transition-colors">Cancelar</button><button onClick={ejecutarEliminacionBatchCasos} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-3 rounded-xl text-sm font-bold transition-colors">Eliminar Carpetas</button></div></div></div>)}
+
     </div>
   );
 }
