@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   FolderOpen, UploadCloud, FileText, CheckCircle, Clock, Trash2, Edit3,
   Folder, Layers, Search, ChevronDown, ChevronUp, Check, AlertTriangle,
@@ -29,6 +29,8 @@ export default function Dashboard() {
 
   const [lote, setLote] = useState<ArchivoLote[]>([]);
   const [procesandoLote, setProcesandoLote] = useState(false);
+
+  const cancelarProcesoRef = useRef(false);
 
   const [busqueda, setBusqueda] = useState("");
   const [filtroEstado, setFiltroEstado] = useState<string>("TODOS");
@@ -147,9 +149,21 @@ export default function Dashboard() {
     setLote(prev => prev.map(a => a.id === id ? { ...a, estado, detalle: detalle || a.detalle, areaJuridica: area || a.areaJuridica } : a));
   };
 
+  const cancelarSubidaMasiva = () => {
+    cancelarProcesoRef.current = true;
+    setProcesandoLote(false);
+    setLote(prev => prev.map(a =>
+      (a.estado === 'subiendo' || a.estado === 'analizando' || a.estado === 'esperando')
+        ? { ...a, estado: 'error', detalle: 'Cancelado por el usuario' }
+        : a
+    ));
+    mostrarNotificacion("error", "Proceso de subida detenido.");
+  };
+
   const procesarLote = async () => {
     if (lote.length === 0 || procesandoLote) return;
     setProcesandoLote(true);
+    cancelarProcesoRef.current = false;
 
     let procesados = 0;
     let conError = 0;
@@ -158,6 +172,8 @@ export default function Dashboard() {
 
     const procesarSiguiente = async () => {
       while (index < pendientes.length) {
+        if (cancelarProcesoRef.current) break;
+
         const item = pendientes[index++];
         try {
           actualizarEstadoLote(item.id, 'subiendo');
@@ -170,6 +186,8 @@ export default function Dashboard() {
           if (!resTicket.ok) throw new Error("Error en servidor");
           const { urlDeSubida, claveArchivo } = await resTicket.json();
 
+          if (cancelarProcesoRef.current) break;
+
           const resSubida = await fetch(urlDeSubida, { method: "PUT", body: item.file, headers: { "Content-Type": item.file.type } });
           if (!resSubida.ok) throw new Error("Error de red");
 
@@ -177,10 +195,11 @@ export default function Dashboard() {
           let exitoIA = false;
           let docRes = null;
 
-          // SISTEMA DE REINTENTOS AUTOMÁTICOS EN CASO DE BLOQUEO 429
           while (reintentos < 4 && !exitoIA) {
+            if (cancelarProcesoRef.current) break;
+
             try {
-              actualizarEstadoLote(item.id, 'analizando', reintentos > 0 ? `Pausado temporalmente por cuota. Reintentando de forma invisible (${reintentos}/3)...` : undefined);
+              actualizarEstadoLote(item.id, 'analizando', reintentos > 0 ? `Pausado temporalmente por saturación. Reintentando (${reintentos}/3)...` : undefined);
 
               const resBd = await fetch("/api/documentos", {
                 method: "POST",
@@ -191,7 +210,7 @@ export default function Dashboard() {
               if (!resBd.ok) {
                 const errData = await resBd.json();
                 if (resBd.status === 429 || resBd.status === 503 || errData.error === "429" || errData.error === "REINTENTAR") {
-                  throw new Error("REINTENTAR"); // Lanzamos la excepción para reintentar
+                  throw new Error("REINTENTAR");
                 }
                 throw new Error(errData.error || "Fallo en motor de extracción");
               }
@@ -205,21 +224,32 @@ export default function Dashboard() {
                 reintentos++;
                 if (reintentos >= 4) throw new Error("Servidores de Google saturados. Intenta de nuevo más tarde.");
 
-                // Si falla, espera 10s, luego 20s, luego 30s antes de reintentar
-                await new Promise(resolve => setTimeout(resolve, 10000 * reintentos));
+                let tiempoEspera = 10000 * reintentos;
+                let tiempoPasado = 0;
+                while (tiempoPasado < tiempoEspera) {
+                  if (cancelarProcesoRef.current) break;
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+                  tiempoPasado += 1000;
+                }
               } else {
-                throw errorIA; // Error distinto, rompe el bucle
+                throw errorIA;
               }
             }
           }
+
+          if (cancelarProcesoRef.current) break;
 
           const casoArea = docRes?.casoId ? casos.find(c => c.id === docRes.casoId)?.areaJuridica : "CIVIL";
           actualizarEstadoLote(item.id, 'exito', docRes?.materiaLegal || "Procesado", casoArea);
           procesados++;
           cargarDatos();
 
-          // Retraso normal de 8 segundos entre cada archivo para evitar activar el escudo de Google
-          await new Promise(resolve => setTimeout(resolve, 8000));
+          let pausaNormal = 0;
+          while (pausaNormal < 8000) {
+            if (cancelarProcesoRef.current) break;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            pausaNormal += 1000;
+          }
 
         } catch (error: any) {
           actualizarEstadoLote(item.id, 'error', error.message || "Fallo");
@@ -233,6 +263,8 @@ export default function Dashboard() {
 
     setProcesandoLote(false);
     cargarDatos();
+
+    if (cancelarProcesoRef.current) return;
 
     if (conError === 0) {
       mostrarNotificacion("exito", `¡Completado! (${procesados} archivos)`);
@@ -510,7 +542,9 @@ export default function Dashboard() {
                         <button onClick={limpiarLoteCompletado} className="flex-1 sm:flex-none px-6 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-sm font-bold transition-all">Limpiar Lista</button>
                       ) : (
                         <>
-                          <button onClick={() => setLote([])} disabled={procesandoLote} className="flex-1 sm:flex-none px-5 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-sm font-bold transition-all disabled:opacity-50">Cancelar Todo</button>
+                          <button onClick={procesandoLote ? cancelarSubidaMasiva : () => setLote([])} className={`flex-1 sm:flex-none px-5 py-3 rounded-xl text-sm font-bold transition-all ${procesandoLote ? "bg-rose-100 hover:bg-rose-200 text-rose-700" : "bg-slate-200 hover:bg-slate-300 text-slate-700"}`}>
+                            {procesandoLote ? "Detener Subida" : "Cancelar Todo"}
+                          </button>
                           <button onClick={procesarLote} disabled={procesandoLote} className="flex-1 sm:flex-none px-7 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-600/30 disabled:opacity-50 flex items-center justify-center gap-2">
                             {procesandoLote ? <><Loader2 size={16} className="animate-spin" /> Procesando Lote...</> : <><Play size={16} fill="currentColor" /> Procesar Todos</>}
                           </button>
