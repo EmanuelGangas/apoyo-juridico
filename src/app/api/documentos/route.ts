@@ -15,7 +15,7 @@ export const fetchCache = 'force-no-store';
 export const maxDuration = 60;
 
 // VERSIÓN CORRECTA DEL MOTOR ACTUAL
-const ENGINE_VERSION = "gemini-3.5-flash";
+const ENGINE_VERSION = "gemini-2.5-flash";
 
 function obtenerMimeType(ext: string) {
     if (ext === 'pdf') return 'application/pdf';
